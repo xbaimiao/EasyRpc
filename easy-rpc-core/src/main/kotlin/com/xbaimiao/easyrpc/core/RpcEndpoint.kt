@@ -1,10 +1,9 @@
 ﻿package com.xbaimiao.easyrpc.core
 
+import com.xbaimiao.easyrpc.codec.RpcCodec
 import com.xbaimiao.easyrpc.dsl.RpcMethod
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
+import io.netty.buffer.ByteBuf
+import io.netty.buffer.Unpooled
 import java.time.Duration
 import java.util.Collections
 import java.util.concurrent.CompletableFuture
@@ -149,14 +148,14 @@ class RpcEndpoint(
         val many = pendingMany[frame.requestId]
         if (many != null) {
             runCatching {
-                DataInputStream(ByteArrayInputStream(frame.payload)).use { many.method.resultCodec.decode(it) }
+                decodePayload(frame.payload, many.method.resultCodec)
             }.onSuccess { many.results += it }
             return
         }
 
         val call = pending.remove(frame.requestId) ?: return
         runCatching {
-            DataInputStream(ByteArrayInputStream(frame.payload)).use { call.method.resultCodec.decode(it) }
+            decodePayload(frame.payload, call.method.resultCodec)
         }.onSuccess { call.future.complete(it) }
             .onFailure { call.future.completeExceptionally(it) }
     }
@@ -176,7 +175,7 @@ class RpcEndpoint(
         CompletableFuture.runAsync({
             runCatching {
                 val method = registration.method
-                val args = DataInputStream(ByteArrayInputStream(frame.payload)).use { method.argsCodec.decode(it) }
+                val args = decodePayload(frame.payload, method.argsCodec)
                 registration.handler(RpcSource(frame.sourceNode, frame.sourceKind), args).whenComplete { result, error ->
                     if (error != null) {
                         val rpcError = error.unwrapRpcError()
@@ -232,10 +231,23 @@ class RpcEndpoint(
             ?: RpcException("internal_error", message ?: toString(), this)
     }
 
-    private fun <T> encodePayload(writer: (DataOutputStream) -> T): ByteArray {
-        val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { writer(it) }
-        return bytes.toByteArray()
+    private fun <T> decodePayload(payload: ByteArray, codec: RpcCodec<T>): T {
+        val input = Unpooled.wrappedBuffer(payload)
+        return try {
+            codec.decode(input)
+        } finally {
+            input.release()
+        }
+    }
+
+    private fun encodePayload(writer: (ByteBuf) -> Unit): ByteArray {
+        val output = Unpooled.buffer()
+        return try {
+            writer(output)
+            ByteArray(output.readableBytes()).also { output.readBytes(it) }
+        } finally {
+            output.release()
+        }
     }
 
     private data class PendingCall<R>(val future: CompletableFuture<R>, val method: RpcMethod<Any?, Any?>)

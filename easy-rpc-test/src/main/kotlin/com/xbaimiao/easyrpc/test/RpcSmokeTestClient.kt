@@ -14,6 +14,10 @@ fun main() {
         val sum = SmokeRpc.ADD.args(220, 22).call(rpc, RpcTarget.service()).get(3, TimeUnit.SECONDS)
         println("ADD => $sum")
 
+
+        val direct = SmokeRpc.CLIENT_ECHO.args("direct").call(client, RpcTarget.node("client-b")).get(3, TimeUnit.SECONDS)
+        println("CLIENT_B => $direct")
+
         val failed = SmokeRpc.FAIL.call(rpc, RpcTarget.service()).handle { _, error ->
             val rpcError = generateSequence(error) { it.cause }.firstOrNull { it is RpcException } as? RpcException
             "${rpcError?.classifier}:${rpcError?.message}"

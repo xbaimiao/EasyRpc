@@ -83,9 +83,7 @@ fun main() {
         }.get(3, TimeUnit.SECONDS)
         println("FAIL => $failed")
     } finally {
-        clientA.close()
-        clientB.close()
-        server.close()
     }
+    server.awaitClose()
 }
 
