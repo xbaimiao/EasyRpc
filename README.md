@@ -55,6 +55,9 @@ val result = DemoRpc.PING
     .get()
 ```
 
+`NettyRpcClient.connect()` 会启动连接生命周期。service 临时不可用或连接中断时，client 会自动重连；
+只有手动调用 `client.close()` 才会停止重连并释放 endpoint、handler 线程池和 Netty event loop。
+
 ## client 注册 RPC
 
 client 也可以 listen，所以另一个 client 能调它：

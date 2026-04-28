@@ -166,6 +166,19 @@ class RpcEndpoint(
         pendingMany[frame.requestId]?.errors?.add(error)
     }
 
+    /**
+     * 让当前所有未完成请求失败，但保留已经注册的 listen handler。
+     *
+     * client 网络断线时会调用它，避免旧请求一直等到 timeout；
+     * 重连成功后 endpoint 仍然可以继续复用原来的 RPC 定义和 handler。
+     */
+    fun failPending(error: Throwable) {
+        pending.values.forEach { it.future.completeExceptionally(error) }
+        pendingMany.values.forEach { it.future.completeExceptionally(error) }
+        pending.clear()
+        pendingMany.clear()
+    }
+
     private fun handleRequest(connection: RpcConnection, frame: RpcFrame) {
         val registration = handlers["${frame.group}:${frame.method}"]
         if (registration == null) {

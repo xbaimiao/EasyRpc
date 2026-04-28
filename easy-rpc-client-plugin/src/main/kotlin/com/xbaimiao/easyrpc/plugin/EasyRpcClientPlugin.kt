@@ -35,16 +35,20 @@ class EasyRpcClientPlugin : JavaPlugin() {
         plugin = null
     }
 
-    /** 按 config.yml 建立 Netty RPC 连接。重复调用会复用已有 client。 */
+    /** 按 config.yml 启动 Netty RPC client。重复调用会复用已有 client。 */
     fun connect(): NettyRpcClient {
         client?.let { return it }
         val host = config.getString("host", "127.0.0.1") ?: "127.0.0.1"
         val port = config.getInt("port", 29090)
         val nodeId = config.getString("node-id", server.name) ?: server.name
-        return NettyRpcClient(host, port, nodeId).connect().also {
-            client = it
+        val rpcClient = NettyRpcClient(host, port, nodeId).connect()
+        client = rpcClient
+        if (rpcClient.isConnected()) {
             logger.info("EasyRpc client connected to $host:$port as $nodeId")
+        } else {
+            logger.warning("EasyRpc service is unavailable, client will reconnect to $host:$port as $nodeId")
         }
+        return rpcClient
     }
 
     /** 关闭当前 RPC 连接。 */

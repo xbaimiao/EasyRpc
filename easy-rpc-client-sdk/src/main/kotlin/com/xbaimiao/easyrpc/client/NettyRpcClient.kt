@@ -4,6 +4,7 @@ import com.xbaimiao.easyrpc.core.*
 import com.xbaimiao.easyrpc.dsl.*
 import io.netty.bootstrap.Bootstrap
 import io.netty.channel.Channel
+import io.netty.channel.ChannelFuture
 import io.netty.channel.ChannelHandlerContext
 import io.netty.channel.ChannelInitializer
 import io.netty.channel.EventLoopGroup
@@ -18,7 +19,9 @@ import io.netty.handler.codec.bytes.ByteArrayEncoder
 import java.net.InetSocketAddress
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
 
 /**
  * Netty 版 RPC client。
@@ -29,33 +32,48 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - 可以调用 service：`RpcTarget.service()`。
  * - 可以调用其它 client：`RpcTarget.node("client-b")`。
  * - 可以注册自己的 handler，被 service 或其它 client 调用。
+ *
+ * 只有手动调用 [close] 才会彻底释放资源；网络断线会保留 endpoint 和 listen handler，
+ * 并按 1s、2s、4s ... 最大 30s 的退避间隔自动重连。
  */
 class NettyRpcClient(
     private val host: String,
     private val port: Int,
     val nodeId: String,
+    private val reconnectInitialDelay: Duration = Duration.ofSeconds(1),
+    private val reconnectMaxDelay: Duration = Duration.ofSeconds(30),
 ) : RpcCaller, RpcRuntime, AutoCloseable {
     /** 当前 client 的 endpoint。handler 和 pending 请求都存在这里。 */
     override val endpoint = RpcEndpoint(nodeId, RpcNodeKind.CLIENT)
     private val group: EventLoopGroup = NioEventLoopGroup()
     private val running = AtomicBoolean(false)
-    private lateinit var channel: Channel
+    private val manuallyClosed = AtomicBoolean(false)
+    private val connecting = AtomicBoolean(false)
+    private val reconnectScheduled = AtomicBoolean(false)
+    private lateinit var bootstrap: Bootstrap
+    @Volatile private var channel: Channel? = null
+    @Volatile private var reconnectDelayMillis = reconnectInitialDelay.toMillis().coerceAtLeast(1)
 
     private val connection = object : RpcConnection {
         override val remoteName: String = "router"
         override fun send(packet: ByteArray) {
-            channel.writeAndFlush(packet)
+            val activeChannel = channel
+            if (activeChannel == null || !activeChannel.isActive) {
+                throw RpcException("disconnected", "RPC client is disconnected: $nodeId")
+            }
+            activeChannel.writeAndFlush(packet)
         }
 
         override fun close() {
-            runCatching { channel.close() }
+            runCatching { channel?.close() }
         }
     }
 
-    /** 建立 Netty 连接并发送 HELLO 注册包。 */
+    /** 启动 Netty client，并尝试建立连接；如果 service 暂不可用，会进入后台重连。 */
     fun connect(): NettyRpcClient {
         check(running.compareAndSet(false, true)) { "RPC client already connected" }
-        val bootstrap = Bootstrap()
+        manuallyClosed.set(false)
+        bootstrap = Bootstrap()
             .group(group)
             .channel(NioSocketChannel::class.java)
             .handler(object : ChannelInitializer<SocketChannel>() {
@@ -68,8 +86,13 @@ class NettyRpcClient(
                         .addLast(ClientHandler())
                 }
             })
-        channel = bootstrap.connect(InetSocketAddress(host, port)).syncUninterruptibly().channel()
-        sendHello()
+        val connectFuture = bootstrap.connect(InetSocketAddress(host, port))
+        connectFuture.awaitUninterruptibly()
+        if (connectFuture.isSuccess) {
+            activateChannel(connectFuture.channel())
+        } else {
+            scheduleReconnect()
+        }
         return this
     }
 
@@ -81,6 +104,7 @@ class NettyRpcClient(
         timeout: Duration,
     ): CompletableFuture<R> {
         check(running.get()) { "RPC client is not connected" }
+        check(isConnected()) { "RPC client is reconnecting: $nodeId" }
         return endpoint.call(connection, method, args, target, timeout)
     }
 
@@ -92,6 +116,7 @@ class NettyRpcClient(
         collectFor: Duration,
     ): CompletableFuture<List<R>> {
         check(running.get()) { "RPC client is not connected" }
+        check(isConnected()) { "RPC client is reconnecting: $nodeId" }
         return endpoint.callMany(connection, method, args, target, collectFor)
     }
 
@@ -104,13 +129,27 @@ class NettyRpcClient(
     fun <A, B, C, D, E, R> listen(method: RpcMethod5<A, B, C, D, E, R>, handler: (A, B, C, D, E) -> R) = method.listen(endpoint, handler)
 
     override fun close() {
+        manuallyClosed.set(true)
         if (!running.compareAndSet(true, false)) return
-        runCatching { channel.close() }
+        reconnectScheduled.set(false)
+        connecting.set(false)
+        val oldChannel = channel
+        channel = null
+        runCatching { oldChannel?.close() }
         endpoint.close()
         group.shutdownGracefully()
     }
 
-    private fun sendHello() {
+    /** 当前是否有可用连接。重连窗口内会返回 false。 */
+    fun isConnected(): Boolean = channel?.isActive == true
+
+    private fun activateChannel(connected: Channel) {
+        channel = connected
+        reconnectDelayMillis = reconnectInitialDelay.toMillis().coerceAtLeast(1)
+        sendHello(connected)
+    }
+
+    private fun sendHello(activeChannel: Channel) {
         val hello = RpcFrame(
             type = RpcFrameType.HELLO,
             requestId = 0,
@@ -118,7 +157,37 @@ class NettyRpcClient(
             sourceKind = RpcNodeKind.CLIENT,
             target = RpcTarget.Service,
         )
-        channel.writeAndFlush(RpcFrameCodec.encode(hello))
+        activeChannel.writeAndFlush(RpcFrameCodec.encode(hello))
+    }
+
+    private fun scheduleReconnect() {
+        if (!running.get() || manuallyClosed.get()) return
+        if (!reconnectScheduled.compareAndSet(false, true)) return
+
+        val delay = reconnectDelayMillis
+        reconnectDelayMillis = min(reconnectDelayMillis * 2, reconnectMaxDelay.toMillis().coerceAtLeast(delay))
+        group.next().schedule({
+            reconnectScheduled.set(false)
+            if (!running.get() || manuallyClosed.get() || isConnected()) return@schedule
+            connectAsync()
+        }, delay, TimeUnit.MILLISECONDS)
+    }
+
+    private fun connectAsync() {
+        if (!connecting.compareAndSet(false, true)) return
+        bootstrap.connect(InetSocketAddress(host, port)).addListener { future ->
+            connecting.set(false)
+            val connectFuture = future as ChannelFuture
+            if (!running.get() || manuallyClosed.get()) {
+                runCatching { connectFuture.channel().close() }
+                return@addListener
+            }
+            if (connectFuture.isSuccess) {
+                activateChannel(connectFuture.channel())
+            } else {
+                scheduleReconnect()
+            }
+        }
     }
 
     private inner class ClientHandler : SimpleChannelInboundHandler<ByteArray>() {
@@ -127,7 +196,13 @@ class NettyRpcClient(
         }
 
         override fun channelInactive(ctx: ChannelHandlerContext) {
-            close()
+            val inactiveChannelIsCurrent = channel == ctx.channel()
+            if (inactiveChannelIsCurrent) {
+                channel = null
+            }
+            if (!inactiveChannelIsCurrent || !running.get() || manuallyClosed.get()) return
+            endpoint.failPending(RpcException("disconnected", "RPC client disconnected: $nodeId"))
+            scheduleReconnect()
         }
     }
 }
