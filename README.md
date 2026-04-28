@@ -1,82 +1,96 @@
 ﻿# EasyRpc
 
-EasyRpc 是一套轻量 Kotlin RPC 骨架，目标是复刻 dispatcher 项目里集中声明 RPC、调用端 `.args(...).call(...)`、服务端 `.listen { ... }` 的使用体验。
+EasyRpc 是一套轻量 Kotlin RPC。核心目标是：RPC 集中声明，调用时能选择目标，service 和 client 都能注册 handler。
+
+底层现在使用：
+
+- Netty 作为网络 transport。
+- protobuf 作为 RPC frame 编码。
+- service 作为中心 router，负责把请求转发给 service 自己、指定 client、所有节点或所有 client。
 
 ## 模块
 
-- `easy-rpc-core`: RPC DSL、Codec、请求响应帧、超时和错误模型。
-- `easy-rpc-service`: 普通 JVM TCP 服务端，不是 Bukkit 插件。
-- `easy-rpc-client-sdk`: 普通 JVM 客户端 SDK。
-- `easy-rpc-client-plugin`: Paper 插件版客户端，启动时连接 RPC 服务。
+- `easy-rpc-core`: RPC DSL、Codec、protobuf frame、目标路由模型、endpoint。
+- `easy-rpc-service`: `NettyRpcServer`，普通 JVM 服务端，同时也是路由中心。
+- `easy-rpc-client-sdk`: `NettyRpcClient`，普通 JVM 客户端 SDK。
+- `easy-rpc-client-plugin`: Paper 插件版客户端。
+- `easy-rpc-test`: 可运行测试项目。
 
-## 定义协议
+## 定义 RPC
 
 ```kotlin
-import com.xbaimiao.easyrpc.codec.RpcCodecs
-import com.xbaimiao.easyrpc.dsl.RpcGroup
-
 object DemoRpc : RpcGroup("demo") {
     val PING = rpc("ping")
         .param(RpcCodecs.STRING)
         .returns(RpcCodecs.STRING)
 
-    val CREATE_ANCHOR = rpc("create_anchor")
-        .param(RpcCodecs.STRING)
-        .param(RpcCodecs.DOUBLE)
-        .param(RpcCodecs.list(RpcCodecs.STRING))
+    val ADD = rpc("add")
+        .param(RpcCodecs.INT)
+        .param(RpcCodecs.INT)
         .returns(RpcCodecs.INT)
 }
 ```
 
-## 服务端
+## service
 
 ```kotlin
-val server = TcpRpcServer(serviceName = "demo", port = 29090)
+val server = NettyRpcServer(host = "0.0.0.0", port = 29090, nodeId = "service")
 
-DemoRpc.PING.listen(server.endpoint) { text ->
-    "pong: $text"
-}
-
-DemoRpc.CREATE_ANCHOR.listen(server.endpoint) { domain, score, players ->
-    println("create anchor domain=$domain score=$score players=$players")
-    1
+DemoRpc.PING.listen(server) { text ->
+    "pong:$text"
 }
 
 server.start()
 server.awaitClose()
 ```
 
-## SDK 客户端
+## client
 
 ```kotlin
-val client = TcpRpcClient("127.0.0.1", 29090).connect()
-val result = DemoRpc.PING.args("hello").call(client).get()
-println(result)
+val client = NettyRpcClient("127.0.0.1", 29090, nodeId = "lobby-1").connect()
+
+val result = DemoRpc.PING
+    .args("hello")
+    .call(client, RpcTarget.service())
+    .get()
 ```
 
-## Paper 插件客户端
+## client 注册 RPC
 
-安装 `easy-rpc-client-plugin` 后，其它插件可以直接取客户端：
+client 也可以 listen，所以另一个 client 能调它：
 
 ```kotlin
-val client = EasyRpcClientPlugin.client()
-DemoRpc.PING.args("hello").call(client).thenAccept { result ->
-    println(result)
+DemoRpc.PING.listen(clientB) { text ->
+    "client-b:$text"
 }
+
+val result = DemoRpc.PING
+    .args("hello")
+    .call(clientA, RpcTarget.node("client-b"))
+    .get()
 ```
 
-`easy-rpc-client-plugin/src/main/resources/config.yml`:
+## 目标类型
 
-```yaml
-host: 127.0.0.1
-port: 29090
-node-name: bukkit-client
-connect-on-enable: true
+```kotlin
+RpcTarget.service()        // 调 service 节点
+RpcTarget.node("client-b") // 调指定节点
+RpcTarget.allClients()     // 调所有 client，需要 callAll
+RpcTarget.all()            // 调 service + 所有 client，需要 callAll
 ```
 
-## protobuf
+广播调用使用 `callAll`：
 
-core 内置了 protobuf codec：
+```kotlin
+val replies = DemoRpc.PING
+    .args("broadcast")
+    .callAll(client, RpcTarget.allClients(), Duration.ofMillis(500))
+    .get()
+```
+
+## protobuf payload
+
+RPC frame 本身已经是 protobuf。业务参数默认用 `RpcCodec` 编码；如果业务 payload 也想用 protobuf：
 
 ```kotlin
 val ANCHOR = RpcCodecs.protobuf(MyProto.Anchor::parseFrom)
@@ -86,36 +100,29 @@ val QUERY = rpc("query")
     .returnsNullable(ANCHOR)
 ```
 
-注意 proto 字段号发布后不要修改，不再使用的字段号也不要复用。
-
-## 错误
-
-服务端可以抛 `RpcException`，客户端会收到同样的 classifier：
-
-```kotlin
-throw RpcException("duplicate", "playerA playerB")
-```
 ## 一键测试项目
-
-`easy-rpc-test` 会在同一个 JVM 里启动一个本地 `TcpRpcServer`，然后创建 `TcpRpcClient` 调用 `PING`、`ADD` 和错误返回示例：
-
-```bash
-gradle :easy-rpc-test:run
-```
-
-Windows 下：
 
 ```powershell
 gradle :easy-rpc-test:run
 ```
 
+测试会启动一个 service 和两个 client，覆盖：
+
+- client -> service
+- client -> 指定 client
+- client -> allClients
+- client -> all
+- service 错误返回
+
 预期输出类似：
 
 ```text
 service started on 127.0.0.1:29190
-PING => pong:hello
+SERVICE => service:pong:hello
+CLIENT_B => client-b:echo:direct
+ALL_CLIENTS => client-a:echo:broadcast-client, client-b:echo:broadcast-client
+ALL => client-a:echo:broadcast-all, client-b:echo:broadcast-all, service:echo:broadcast-all
 ADD => 42
 FAIL => test_error:this is expected
 ```
-
 

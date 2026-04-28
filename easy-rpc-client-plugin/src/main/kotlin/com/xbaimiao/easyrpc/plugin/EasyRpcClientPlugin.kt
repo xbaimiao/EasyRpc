@@ -1,6 +1,6 @@
 ﻿package com.xbaimiao.easyrpc.plugin
 
-import com.xbaimiao.easyrpc.client.TcpRpcClient
+import com.xbaimiao.easyrpc.client.NettyRpcClient
 import org.bukkit.plugin.java.JavaPlugin
 
 class EasyRpcClientPlugin : JavaPlugin() {
@@ -8,11 +8,11 @@ class EasyRpcClientPlugin : JavaPlugin() {
         private var plugin: EasyRpcClientPlugin? = null
 
         fun instance(): EasyRpcClientPlugin = plugin ?: error("EasyRpcClientPlugin is not enabled")
-        fun clientOrNull(): TcpRpcClient? = plugin?.client
-        fun client(): TcpRpcClient = clientOrNull() ?: error("EasyRpc client is not connected")
+        fun clientOrNull(): NettyRpcClient? = plugin?.client
+        fun client(): NettyRpcClient = clientOrNull() ?: error("EasyRpc client is not connected")
     }
 
-    private var client: TcpRpcClient? = null
+    private var client: NettyRpcClient? = null
 
     override fun onEnable() {
         plugin = this
@@ -29,14 +29,14 @@ class EasyRpcClientPlugin : JavaPlugin() {
         plugin = null
     }
 
-    fun connect(): TcpRpcClient {
+    fun connect(): NettyRpcClient {
         client?.let { return it }
         val host = config.getString("host", "127.0.0.1") ?: "127.0.0.1"
         val port = config.getInt("port", 29090)
-        val nodeName = config.getString("node-name", server.name) ?: server.name
-        return TcpRpcClient(host, port, nodeName).connect().also {
+        val nodeId = config.getString("node-id", server.name) ?: server.name
+        return NettyRpcClient(host, port, nodeId).connect().also {
             client = it
-            logger.info("EasyRpc client connected to $host:$port")
+            logger.info("EasyRpc client connected to $host:$port as $nodeId")
         }
     }
 

@@ -6,37 +6,66 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.time.Duration
+import java.util.Collections
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * 单个 RPC 节点的运行时核心。
+ *
+ * endpoint 不直接知道 Netty，也不关心包从哪里来。它只负责：
+ *
+ * - 保存当前节点注册的 handler。
+ * - 生成 requestId。
+ * - 管理单响应 pending 请求。
+ * - 管理多响应 pendingMany 请求。
+ * - 编码 request frame、解码 response frame。
+ * - 执行 handler 并返回 RESPONSE/ERROR。
+ */
 class RpcEndpoint(
-    val serviceName: String,
+    /** 当前节点 ID。service 默认是 `service`，client 通常是服务器名或插件自定义名。 */
+    val nodeId: String,
+    /** 当前节点类型，用于对端 handler 判断调用来源。 */
+    val nodeKind: RpcNodeKind,
+    /** handler 执行线程池。不要在 Netty IO 线程里直接跑业务代码。 */
     private val executor: ExecutorService = Executors.newCachedThreadPool { task ->
-        Thread(task, "easy-rpc-handler").apply { isDaemon = true }
+        Thread(task, "easy-rpc-handler-$nodeId").apply { isDaemon = true }
     },
+    /** 超时和 callAll 收集窗口定时器。 */
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { task ->
-        Thread(task, "easy-rpc-timeout").apply { isDaemon = true }
+        Thread(task, "easy-rpc-timeout-$nodeId").apply { isDaemon = true }
     },
 ) : AutoCloseable {
     private val ids = AtomicLong(1)
     private val pending = ConcurrentHashMap<Long, PendingCall<Any?>>()
+    private val pendingMany = ConcurrentHashMap<Long, PendingMany<Any?>>()
     private val handlers = ConcurrentHashMap<String, HandlerRegistration<Any?, Any?>>()
 
+    /** 注册一个底层 handler。通常业务代码会使用 `RpcMethod.listen(runtime) { ... }`。 */
     fun <A, R> register(method: RpcMethod<A, R>, handler: (RpcSource, A) -> CompletionStage<R>) {
         val previous = handlers.put(method.key, HandlerRegistration(method, handler) as HandlerRegistration<Any?, Any?>)
         require(previous == null) { "RPC handler already registered: ${method.key}" }
     }
 
+    /** endpoint 级别 listen，保留给需要 RpcSource 的高级用法。 */
+    fun <A, R> listen(method: RpcMethod<A, R>, handler: (RpcSource, A) -> CompletionStage<R>) = register(method, handler)
+
+    /**
+     * 发起单响应 RPC。
+     *
+     * 返回 future 会在第一个 RESPONSE 到达时完成；ERROR 到达时异常完成；timeout 到期后异常完成。
+     */
     fun <A, R> call(
         connection: RpcConnection,
         method: RpcMethod<A, R>,
         args: A,
+        target: RpcTarget = RpcTarget.Service,
         timeout: Duration = Duration.ofSeconds(10),
     ): CompletableFuture<R> {
         val requestId = ids.getAndIncrement()
@@ -48,31 +77,94 @@ class RpcEndpoint(
             }
         }, timeout.toMillis(), TimeUnit.MILLISECONDS)
 
-        val payload = encodePayload { method.argsCodec.encode(it, args) }
-        val frame = RpcFrame(RpcFrameType.REQUEST, requestId, serviceName, method.group, method.name, payload)
-        runCatching { connection.send(RpcFrameCodec.encode(frame)) }.onFailure {
-            pending.remove(requestId)
-            future.completeExceptionally(it)
-        }
+        sendRequest(connection, requestId, method, args, target, future)
         return future.thenApply { it as R }
     }
 
+    /**
+     * 发起多响应 RPC。
+     *
+     * RESPONSE 会不断追加到 results；collectFor 到期后 future 正常完成并返回当前结果列表。
+     * 单个节点 ERROR 不会让整体失败，会暂存到 errors 中，后续可按需要暴露。
+     */
+    fun <A, R> callMany(
+        connection: RpcConnection,
+        method: RpcMethod<A, R>,
+        args: A,
+        target: RpcTarget = RpcTarget.AllClients,
+        collectFor: Duration = Duration.ofMillis(500),
+    ): CompletableFuture<List<R>> {
+        val requestId = ids.getAndIncrement()
+        val future = CompletableFuture<List<Any?>>()
+        val collector = PendingMany(future, method as RpcMethod<Any?, Any?>, Collections.synchronizedList(mutableListOf()))
+        pendingMany[requestId] = collector
+        scheduler.schedule({
+            pendingMany.remove(requestId)?.let {
+                future.complete(it.results.toList())
+            }
+        }, collectFor.toMillis(), TimeUnit.MILLISECONDS)
+
+        sendRequest(connection, requestId, method, args, target, future)
+        return future.thenApply { list -> list.map { it as R } }
+    }
+
+    private fun <A> sendRequest(
+        connection: RpcConnection,
+        requestId: Long,
+        method: RpcMethod<A, *>,
+        args: A,
+        target: RpcTarget,
+        future: CompletableFuture<*>,
+    ) {
+        val payload = encodePayload { method.argsCodec.encode(it, args) }
+        val frame = RpcFrame(
+            type = RpcFrameType.REQUEST,
+            requestId = requestId,
+            sourceNode = nodeId,
+            sourceKind = nodeKind,
+            target = target,
+            group = method.group,
+            method = method.name,
+            payload = payload,
+        )
+        runCatching { connection.send(RpcFrameCodec.encode(frame)) }.onFailure {
+            pending.remove(requestId)
+            pendingMany.remove(requestId)
+            future.completeExceptionally(it)
+        }
+    }
+
+    /** 接收一个已经由 transport 拿到的二进制 frame。 */
     fun receive(connection: RpcConnection, packet: ByteArray) {
         val frame = runCatching { RpcFrameCodec.decode(packet) }.getOrElse { return }
         when (frame.type) {
             RpcFrameType.REQUEST -> handleRequest(connection, frame)
             RpcFrameType.RESPONSE -> handleResponse(frame)
-            RpcFrameType.ERROR -> pending.remove(frame.requestId)?.future
-                ?.completeExceptionally(RpcException(frame.errorClassifier, frame.errorMessage))
+            RpcFrameType.ERROR -> handleError(frame)
+            RpcFrameType.HELLO -> Unit
         }
     }
 
     private fun handleResponse(frame: RpcFrame) {
+        val many = pendingMany[frame.requestId]
+        if (many != null) {
+            runCatching {
+                DataInputStream(ByteArrayInputStream(frame.payload)).use { many.method.resultCodec.decode(it) }
+            }.onSuccess { many.results += it }
+            return
+        }
+
         val call = pending.remove(frame.requestId) ?: return
         runCatching {
             DataInputStream(ByteArrayInputStream(frame.payload)).use { call.method.resultCodec.decode(it) }
         }.onSuccess { call.future.complete(it) }
             .onFailure { call.future.completeExceptionally(it) }
+    }
+
+    private fun handleError(frame: RpcFrame) {
+        val error = RpcException(frame.errorClassifier, frame.errorMessage)
+        pending.remove(frame.requestId)?.future?.completeExceptionally(error)
+        pendingMany[frame.requestId]?.errors?.add(error)
     }
 
     private fun handleRequest(connection: RpcConnection, frame: RpcFrame) {
@@ -85,13 +177,22 @@ class RpcEndpoint(
             runCatching {
                 val method = registration.method
                 val args = DataInputStream(ByteArrayInputStream(frame.payload)).use { method.argsCodec.decode(it) }
-                registration.handler(RpcSource(connection.remoteName), args).whenComplete { result, error ->
+                registration.handler(RpcSource(frame.sourceNode, frame.sourceKind), args).whenComplete { result, error ->
                     if (error != null) {
                         val rpcError = error.unwrapRpcError()
                         sendError(connection, frame, rpcError.classifier, rpcError.message)
                     } else {
                         val payload = encodePayload { method.resultCodec.encode(it, result) }
-                        val response = RpcFrame(RpcFrameType.RESPONSE, frame.requestId, serviceName, frame.group, frame.method, payload)
+                        val response = RpcFrame(
+                            type = RpcFrameType.RESPONSE,
+                            requestId = frame.requestId,
+                            sourceNode = nodeId,
+                            sourceKind = nodeKind,
+                            target = RpcTarget.Node(frame.sourceNode),
+                            group = frame.group,
+                            method = frame.method,
+                            payload = payload,
+                        )
                         connection.send(RpcFrameCodec.encode(response))
                     }
                 }
@@ -104,21 +205,24 @@ class RpcEndpoint(
 
     private fun sendError(connection: RpcConnection, request: RpcFrame, classifier: String, message: String) {
         val response = RpcFrame(
-            RpcFrameType.ERROR,
-            request.requestId,
-            serviceName,
-            request.group,
-            request.method,
-            ByteArray(0),
-            classifier,
-            message,
+            type = RpcFrameType.ERROR,
+            requestId = request.requestId,
+            sourceNode = nodeId,
+            sourceKind = nodeKind,
+            target = RpcTarget.Node(request.sourceNode),
+            group = request.group,
+            method = request.method,
+            errorClassifier = classifier,
+            errorMessage = message,
         )
         runCatching { connection.send(RpcFrameCodec.encode(response)) }
     }
 
     override fun close() {
         pending.values.forEach { it.future.completeExceptionally(RpcException("closed", "RPC endpoint closed")) }
+        pendingMany.values.forEach { it.future.completeExceptionally(RpcException("closed", "RPC endpoint closed")) }
         pending.clear()
+        pendingMany.clear()
         scheduler.shutdownNow()
         executor.shutdownNow()
     }
@@ -136,10 +240,15 @@ class RpcEndpoint(
 
     private data class PendingCall<R>(val future: CompletableFuture<R>, val method: RpcMethod<Any?, Any?>)
 
+    private data class PendingMany<R>(
+        val future: CompletableFuture<List<R>>,
+        val method: RpcMethod<Any?, Any?>,
+        val results: MutableList<R>,
+        val errors: MutableList<RpcException> = Collections.synchronizedList(mutableListOf()),
+    )
+
     private data class HandlerRegistration<A, R>(
         val method: RpcMethod<A, R>,
         val handler: (RpcSource, A) -> CompletionStage<R>,
     )
 }
-
-

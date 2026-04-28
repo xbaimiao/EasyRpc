@@ -10,9 +10,9 @@ object DemoRpc : RpcGroup("demo") {
 }
 
 fun main() {
-    val server = TcpRpcServer(serviceName = "demo", port = 29090)
-    DemoRpc.PING.listen(server.endpoint) { text -> "pong: $text" }
+    val server = NettyRpcServer(host = "0.0.0.0", port = 29090, nodeId = "service")
+    server.listen(DemoRpc.PING) { text -> "pong: $text" }
     server.start()
-    println("EasyRpc service started on 0.0.0.0:29090")
+    println("EasyRpc Netty service started on 0.0.0.0:29090")
     server.awaitClose()
 }

@@ -4,6 +4,12 @@ import com.xbaimiao.easyrpc.codec.RpcCodec
 import java.io.DataInput
 import java.io.DataOutput
 
+/**
+ * 1 参数 RPC 的参数容器。
+ *
+ * Kotlin 函数类型可以表达 `(A) -> R`，但真正发包时仍然需要把参数组合成一个整体 payload，
+ * 所以 DSL 内部用 ArgsN 把多个参数打包，再交给对应 codec 顺序编码。
+ */
 data class Args1<A>(val a: A) {
     companion object {
         fun <A> codec(a: RpcCodec<A>): RpcCodec<Args1<A>> = object : RpcCodec<Args1<A>> {
@@ -13,6 +19,7 @@ data class Args1<A>(val a: A) {
     }
 }
 
+/** 2 参数 RPC 的参数容器，编码顺序必须和 builder 声明顺序一致。 */
 data class Args2<A, B>(val a: A, val b: B) {
     companion object {
         fun <A, B> codec(a: RpcCodec<A>, b: RpcCodec<B>): RpcCodec<Args2<A, B>> = object : RpcCodec<Args2<A, B>> {
@@ -25,6 +32,7 @@ data class Args2<A, B>(val a: A, val b: B) {
     }
 }
 
+/** 3 参数 RPC 的参数容器。 */
 data class Args3<A, B, C>(val a: A, val b: B, val c: C) {
     companion object {
         fun <A, B, C> codec(a: RpcCodec<A>, b: RpcCodec<B>, c: RpcCodec<C>): RpcCodec<Args3<A, B, C>> = object : RpcCodec<Args3<A, B, C>> {
@@ -38,6 +46,7 @@ data class Args3<A, B, C>(val a: A, val b: B, val c: C) {
     }
 }
 
+/** 4 参数 RPC 的参数容器。 */
 data class Args4<A, B, C, D>(val a: A, val b: B, val c: C, val d: D) {
     companion object {
         fun <A, B, C, D> codec(a: RpcCodec<A>, b: RpcCodec<B>, c: RpcCodec<C>, d: RpcCodec<D>): RpcCodec<Args4<A, B, C, D>> = object : RpcCodec<Args4<A, B, C, D>> {
@@ -52,6 +61,12 @@ data class Args4<A, B, C, D>(val a: A, val b: B, val c: C, val d: D) {
     }
 }
 
+/**
+ * 5 参数 RPC 的参数容器。
+ *
+ * 继续增加 Args6/Args7 技术上可行，但可读性会变差。
+ * 参数很多时建议改成一个 protobuf request message。
+ */
 data class Args5<A, B, C, D, E>(val a: A, val b: B, val c: C, val d: D, val e: E) {
     companion object {
         fun <A, B, C, D, E> codec(a: RpcCodec<A>, b: RpcCodec<B>, c: RpcCodec<C>, d: RpcCodec<D>, e: RpcCodec<E>): RpcCodec<Args5<A, B, C, D, E>> = object : RpcCodec<Args5<A, B, C, D, E>> {

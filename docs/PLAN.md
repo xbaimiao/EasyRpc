@@ -1,62 +1,43 @@
-﻿# EasyRpc 实现计划
+﻿# EasyRpc 设计计划
 
-## 目标
+## 当前设计
 
-实现一套类似 dispatcher 项目 RPC DSL 的轻量 RPC：
+EasyRpc 是中心路由式 RPC：
 
-- RPC 定义集中声明。
-- 客户端使用 `.args(...).call(client)`。
-- 服务端使用 `.listen(endpoint) { ... }`。
-- service 是普通 JVM 进程，不做成 Bukkit 插件。
-- client 分成普通 SDK 和 Paper 插件包装两份。
+- `NettyRpcServer` 是普通 JVM service，同时也是 router。
+- `NettyRpcClient` 连接到 service，并用 HELLO frame 注册自己的 `nodeId`。
+- service 和 client 都拥有 `RpcEndpoint`，都可以注册 handler。
+- 请求 frame 带 `RpcTarget`，router 根据 target 转发。
 
-## 模块边界
+## 为什么 listen 需要 endpoint
 
-### easy-rpc-core
+`RpcMethod` 只是协议定义，不保存运行时状态。handler 必须挂到某个运行时节点上，例如 service endpoint 或某个 client endpoint。
 
-负责稳定协议和 DSL：
+为了使用更顺手，运行时节点提供了便捷方法：
 
-- `RpcCodec<T>`: 基础编码接口。
-- `RpcCodecs`: String、Int、Double、List、Nullable、protobuf 等内置 codec。
-- `RpcGroup` / `RpcBuilder` / `RpcMethod`: Kotlin DSL。
-- `RpcEndpoint`: handler 注册、pending request、超时、错误响应。
-- `RpcFrame`: 二进制请求/响应/错误帧。
-- `TcpPacketIo`: TCP length-prefix 包读写。
+```kotlin
+server.listen(MyRpc.PING) { ... }
+client.listen(MyRpc.PING) { ... }
+```
 
-### easy-rpc-service
+底层仍然是注册到对应 endpoint。
 
-普通 JVM 服务端：
+## 目标路由
 
-- `TcpRpcServer`: 基于 `ServerSocket` 的 TCP RPC 服务端。
-- `ExampleService`: 最小 ping 示例。
+- `RpcTarget.service()`: service 本机处理。
+- `RpcTarget.node(id)`: 指定 node 处理，可以是 service 或某个 client。
+- `RpcTarget.allClients()`: 所有 client 处理，调用端使用 `callAll` 收集响应。
+- `RpcTarget.all()`: service 和所有 client 都处理，调用端使用 `callAll` 收集响应。
 
-### easy-rpc-client-sdk
+## 编码
 
-普通 JVM 客户端：
-
-- `TcpRpcClient`: TCP 连接、读循环、实现 `RpcCaller`。
-
-### easy-rpc-client-plugin
-
-Paper 插件客户端包装：
-
-- `EasyRpcClientPlugin`: Bukkit 生命周期内创建/关闭 `TcpRpcClient`。
-- 其它插件通过 `EasyRpcClientPlugin.client()` 获取客户端。
-
-## 调用链
-
-1. 协议模块中定义：`object DemoRpc : RpcGroup("demo")`。
-2. 服务端启动 `TcpRpcServer`，对方法调用 `.listen(server.endpoint)`。
-3. 客户端启动 `TcpRpcClient(...).connect()`。
-4. 调用端执行 `DemoRpc.PING.args("hello").call(client)`。
-5. `RpcEndpoint` 序列化请求帧，TCP 发送。
-6. 服务端 `RpcEndpoint` 找 handler、执行、序列化响应。
-7. 客户端按 requestId 完成对应 `CompletableFuture`。
+- 外层 RPC frame 使用 protobuf：`easy-rpc-core/src/main/proto/easy_rpc.proto`。
+- 内层业务参数由 `RpcCodec` 控制。
+- 业务对象可以使用 `RpcCodecs.protobuf(...)` 继续走 protobuf。
 
 ## 后续扩展
 
-- 新增 Redis transport：保留 `RpcEndpoint`，替换连接发送/接收层。
-- 新增 Netty transport：替换 `TcpRpcServer/TcpRpcClient` 的 Socket 实现。
-- 新增 proto 模块：专门放 `.proto` 和生成类，业务 service/sdk/plugin 共同依赖。
-- 新增鉴权：在 `RpcFrame` 增加 token 或在连接建立后做 hello/auth RPC。
-- 新增服务发现：client-sdk 外层增加 service registry，不改 DSL。
+- 增加认证 token，放在 HELLO 或 frame metadata 中。
+- 增加心跳和自动重连。
+- 增加服务发现，把中心 router 替换成多 router 集群。
+- 增加 request traceId，便于日志排查。

@@ -9,6 +9,7 @@
     plugins {
         kotlin("jvm") version "1.9.20"
         id("com.gradleup.shadow") version "8.3.5"
+        id("com.google.protobuf") version "0.9.1"
     }
 }
 
@@ -29,4 +30,5 @@ include(":easy-rpc-service")
 include(":easy-rpc-client-sdk")
 include(":easy-rpc-client-plugin")
 include(":easy-rpc-test")
+
 
