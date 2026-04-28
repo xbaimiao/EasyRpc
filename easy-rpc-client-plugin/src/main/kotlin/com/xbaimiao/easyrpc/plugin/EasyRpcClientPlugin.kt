@@ -3,6 +3,12 @@
 import com.xbaimiao.easyrpc.client.NettyRpcClient
 import org.bukkit.plugin.java.JavaPlugin
 
+/**
+ * Paper 插件版 RPC client 包装。
+ *
+ * 这个插件只负责维护一个 [NettyRpcClient] 连接，不承载 service/router。
+ * 其它插件可以依赖它，然后通过 [client] 获取 SDK client 发起 RPC 或注册 handler。
+ */
 class EasyRpcClientPlugin : JavaPlugin() {
     companion object {
         private var plugin: EasyRpcClientPlugin? = null
@@ -29,6 +35,7 @@ class EasyRpcClientPlugin : JavaPlugin() {
         plugin = null
     }
 
+    /** 按 config.yml 建立 Netty RPC 连接。重复调用会复用已有 client。 */
     fun connect(): NettyRpcClient {
         client?.let { return it }
         val host = config.getString("host", "127.0.0.1") ?: "127.0.0.1"
@@ -40,6 +47,7 @@ class EasyRpcClientPlugin : JavaPlugin() {
         }
     }
 
+    /** 关闭当前 RPC 连接。 */
     fun disconnect() {
         client?.close()
         client = null
