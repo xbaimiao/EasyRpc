@@ -1,0 +1,6 @@
+﻿name: EasyRpcClient
+main: com.xbaimiao.easyrpc.plugin.EasyRpcClientPlugin
+version: ${version}
+author: xbaimiao
+api-version: '1.18'
+load: STARTUP
