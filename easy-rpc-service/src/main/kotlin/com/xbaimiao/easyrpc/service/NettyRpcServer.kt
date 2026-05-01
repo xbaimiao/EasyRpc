@@ -27,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * - service 节点：可以自己注册 RPC handler。
  * - router：负责把 client 发来的 frame 转发到 service、指定 client、all 或 allClients。
+ * - registry：保存在线 client 的 nodeId/tags，并同步给所有 client。
  */
 class NettyRpcServer(
     private val host: String = "0.0.0.0",
@@ -37,7 +38,7 @@ class NettyRpcServer(
     override val endpoint = RpcEndpoint(nodeId, RpcNodeKind.SERVICE)
     private val bossGroup: EventLoopGroup = NioEventLoopGroup(1)
     private val workerGroup: EventLoopGroup = NioEventLoopGroup()
-    private val clients = ConcurrentHashMap<String, Channel>()
+    private val clients = ConcurrentHashMap<String, ClientConnection>()
     private var serverChannel: Channel? = null
 
     private val routerConnection = object : RpcConnection {
@@ -70,6 +71,19 @@ class NettyRpcServer(
         serverChannel?.closeFuture()?.syncUninterruptibly()
     }
 
+    /** 当前在线 client 列表。返回值是快照，不会随内部状态继续变化。 */
+    fun onlineClients(): List<RpcClientInfo> = clients.values
+        .map { it.info.copy(tags = it.info.tags.toSet()) }
+        .sortedBy { it.nodeId }
+
+    /** 获取指定 nodeId 的在线 client。 */
+    fun onlineClient(nodeId: String): RpcClientInfo? = clients[nodeId]?.info
+        ?.let { it.copy(tags = it.tags.toSet()) }
+
+    /** 获取拥有指定 tag 的所有在线 client。 */
+    fun onlineClientsByTag(tag: String): List<RpcClientInfo> = onlineClients()
+        .filter { tag in it.tags }
+
     /** service 主动向其它目标发起单响应 RPC。 */
     override fun <A, R> call(
         method: RpcMethod<A, R>,
@@ -96,7 +110,7 @@ class NettyRpcServer(
 
     override fun close() {
         runCatching { serverChannel?.close()?.syncUninterruptibly() }
-        clients.values.forEach { runCatching { it.close() } }
+        clients.values.forEach { runCatching { it.channel.close() } }
         clients.clear()
         endpoint.close()
         bossGroup.shutdownGracefully()
@@ -109,9 +123,12 @@ class NettyRpcServer(
             is RpcTarget.Node -> deliverToNode(frame, target.nodeId, inbound)
             RpcTarget.All -> {
                 deliverToService(frame)
-                clients.values.forEach { deliverToChannel(frame, it) }
+                clients.values.forEach { deliverToChannel(frame, it.channel) }
             }
-            RpcTarget.AllClients -> clients.values.forEach { deliverToChannel(frame, it) }
+            RpcTarget.AllClients -> clients.values.forEach { deliverToChannel(frame, it.channel) }
+            is RpcTarget.Tag -> clients.values
+                .filter { target.tag in it.info.tags }
+                .forEach { deliverToChannel(frame, it.channel) }
         }
     }
 
@@ -120,12 +137,12 @@ class NettyRpcServer(
             deliverToService(frame)
             return
         }
-        val channel = clients[nodeId]
-        if (channel == null || !channel.isActive) {
+        val client = clients[nodeId]
+        if (client == null || !client.channel.isActive) {
             sendRouteError(frame, inbound, "target_not_found", "RPC target node not found: $nodeId")
             return
         }
-        deliverToChannel(frame, channel)
+        deliverToChannel(frame, client.channel)
     }
 
     private fun deliverToService(frame: RpcFrame) {
@@ -151,9 +168,21 @@ class NettyRpcServer(
         if (request.sourceNode == endpoint.nodeId) {
             deliverToService(error)
         } else {
-            val source = clients[request.sourceNode] ?: inbound
+            val source = clients[request.sourceNode]?.channel ?: inbound
             source?.writeAndFlush(RpcFrameCodec.encode(error))
         }
+    }
+
+    private fun broadcastClientSync() {
+        val sync = RpcFrame(
+            type = RpcFrameType.CLIENTS_SYNC,
+            requestId = 0,
+            sourceNode = endpoint.nodeId,
+            sourceKind = RpcNodeKind.SERVICE,
+            target = RpcTarget.AllClients,
+            onlineClients = onlineClients(),
+        )
+        clients.values.forEach { deliverToChannel(sync, it.channel) }
     }
 
     private inner class ServerHandler : SimpleChannelInboundHandler<ByteArray>() {
@@ -162,15 +191,28 @@ class NettyRpcServer(
         override fun channelRead0(ctx: ChannelHandlerContext, msg: ByteArray) {
             val frame = runCatching { RpcFrameCodec.decode(msg) }.getOrElse { return }
             if (frame.type == RpcFrameType.HELLO) {
-                nodeId = frame.sourceNode
-                clients[frame.sourceNode] = ctx.channel()
+                val info = RpcClientInfo(frame.sourceNode, frame.sourceTags)
+                nodeId = info.nodeId
+                clients.put(info.nodeId, ClientConnection(ctx.channel(), info))
+                    ?.channel
+                    ?.takeIf { it != ctx.channel() }
+                    ?.close()
+                broadcastClientSync()
                 return
             }
             route(frame, ctx.channel())
         }
 
         override fun channelInactive(ctx: ChannelHandlerContext) {
-            nodeId?.let { clients.remove(it, ctx.channel()) }
+            val disconnectedNodeId = nodeId ?: return
+            val current = clients[disconnectedNodeId]
+            val removed = current != null && current.channel == ctx.channel() && clients.remove(disconnectedNodeId, current)
+            if (removed) broadcastClientSync()
         }
     }
+
+    private data class ClientConnection(
+        val channel: Channel,
+        val info: RpcClientInfo,
+    )
 }

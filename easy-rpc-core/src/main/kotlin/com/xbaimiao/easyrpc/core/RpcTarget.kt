@@ -6,6 +6,12 @@ enum class RpcNodeKind {
     CLIENT,
 }
 
+/** 在线 client 元数据。 */
+data class RpcClientInfo(
+    val nodeId: String,
+    val tags: Set<String> = emptySet(),
+)
+
 /**
  * RPC 调用目标。
  *
@@ -15,6 +21,7 @@ enum class RpcNodeKind {
  * - [Node]：投递给指定 nodeId，可以是某个 client，也可以是 service 自己。
  * - [All]：service 和所有 client 都会收到，调用方应该使用 `callAll`。
  * - [AllClients]：所有 client 都会收到，调用方应该使用 `callAll`。
+ * - [Tag]：投递给拥有指定 tag 的所有 client，调用方通常使用 `callAll`。
  */
 sealed class RpcTarget {
     /** 调用中心 service 节点。 */
@@ -29,10 +36,14 @@ sealed class RpcTarget {
     /** 只调用所有 client。 */
     data object AllClients : RpcTarget()
 
+    /** 调用拥有指定 tag 的所有 client。 */
+    data class Tag(val tag: String) : RpcTarget()
+
     companion object {
         fun service(): RpcTarget = Service
         fun node(nodeId: String): RpcTarget = Node(nodeId)
         fun all(): RpcTarget = All
         fun allClients(): RpcTarget = AllClients
+        fun tag(tag: String): RpcTarget = Tag(tag)
     }
 }

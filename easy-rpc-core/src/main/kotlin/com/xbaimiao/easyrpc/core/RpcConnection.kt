@@ -12,4 +12,8 @@ interface RpcConnection : AutoCloseable {
 }
 
 /** 请求来源，用于 handler 判断是谁调用了当前 RPC。 */
-data class RpcSource(val nodeId: String, val nodeKind: RpcNodeKind)
+data class RpcSource(
+    val nodeId: String,
+    val nodeKind: RpcNodeKind,
+    val tags: Set<String> = emptySet(),
+)

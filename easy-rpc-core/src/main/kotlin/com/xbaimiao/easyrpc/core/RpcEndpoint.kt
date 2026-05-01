@@ -40,6 +40,8 @@ class RpcEndpoint(
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { task ->
         Thread(task, "easy-rpc-timeout-$nodeId").apply { isDaemon = true }
     },
+    /** 当前节点 tags，会写入发出的 RPC frame，方便 handler 从 RpcSource 读取。 */
+    private val nodeTags: Set<String> = emptySet(),
 ) : AutoCloseable {
     private val ids = AtomicLong(1)
     private val pending = ConcurrentHashMap<Long, PendingCall<Any?>>()
@@ -121,6 +123,7 @@ class RpcEndpoint(
             requestId = requestId,
             sourceNode = nodeId,
             sourceKind = nodeKind,
+            sourceTags = nodeTags,
             target = target,
             group = method.group,
             method = method.name,
@@ -141,6 +144,7 @@ class RpcEndpoint(
             RpcFrameType.RESPONSE -> handleResponse(frame)
             RpcFrameType.ERROR -> handleError(frame)
             RpcFrameType.HELLO -> Unit
+            RpcFrameType.CLIENTS_SYNC -> Unit
         }
     }
 
@@ -189,7 +193,7 @@ class RpcEndpoint(
             runCatching {
                 val method = registration.method
                 val args = decodePayload(frame.payload, method.argsCodec)
-                registration.handler(RpcSource(frame.sourceNode, frame.sourceKind), args).whenComplete { result, error ->
+                registration.handler(RpcSource(frame.sourceNode, frame.sourceKind, frame.sourceTags), args).whenComplete { result, error ->
                     if (error != null) {
                         val rpcError = error.unwrapRpcError()
                         sendError(connection, frame, rpcError.classifier, rpcError.message)
@@ -200,6 +204,7 @@ class RpcEndpoint(
                             requestId = frame.requestId,
                             sourceNode = nodeId,
                             sourceKind = nodeKind,
+                            sourceTags = nodeTags,
                             target = RpcTarget.Node(frame.sourceNode),
                             group = frame.group,
                             method = frame.method,
@@ -221,6 +226,7 @@ class RpcEndpoint(
             requestId = request.requestId,
             sourceNode = nodeId,
             sourceKind = nodeKind,
+            sourceTags = nodeTags,
             target = RpcTarget.Node(request.sourceNode),
             group = request.group,
             method = request.method,

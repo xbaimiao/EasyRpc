@@ -19,6 +19,7 @@ import io.netty.handler.codec.bytes.ByteArrayEncoder
 import java.net.InetSocketAddress
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
@@ -31,7 +32,9 @@ import kotlin.math.min
  *
  * - 可以调用 service：`RpcTarget.service()`。
  * - 可以调用其它 client：`RpcTarget.node("client-b")`。
+ * - 可以调用带指定 tag 的所有 client：`RpcTarget.tag("lobby")`。
  * - 可以注册自己的 handler，被 service 或其它 client 调用。
+ * - 可以通过 [onlineClients] 或 [onlineClientsByTag] 查询 service 同步的在线 client。
  *
  * 只有手动调用 [close] 才会彻底释放资源；网络断线会保留 endpoint 和 listen handler，
  * 并按 1s、2s、4s ... 最大 30s 的退避间隔自动重连。
@@ -42,14 +45,17 @@ class NettyRpcClient(
     val nodeId: String,
     private val reconnectInitialDelay: Duration = Duration.ofSeconds(1),
     private val reconnectMaxDelay: Duration = Duration.ofSeconds(30),
+    tags: Collection<String> = emptySet(),
 ) : RpcCaller, RpcRuntime, AutoCloseable {
     /** 当前 client 的 endpoint。handler 和 pending 请求都存在这里。 */
-    override val endpoint = RpcEndpoint(nodeId, RpcNodeKind.CLIENT)
+    override val endpoint = RpcEndpoint(nodeId, RpcNodeKind.CLIENT, nodeTags = tags.normalizedTags())
+    val tags: Set<String> = tags.normalizedTags()
     private val group: EventLoopGroup = NioEventLoopGroup()
     private val running = AtomicBoolean(false)
     private val manuallyClosed = AtomicBoolean(false)
     private val connecting = AtomicBoolean(false)
     private val reconnectScheduled = AtomicBoolean(false)
+    private val onlineClients = ConcurrentHashMap<String, RpcClientInfo>()
     private lateinit var bootstrap: Bootstrap
     @Volatile private var channel: Channel? = null
     @Volatile private var reconnectDelayMillis = reconnectInitialDelay.toMillis().coerceAtLeast(1)
@@ -143,6 +149,19 @@ class NettyRpcClient(
     /** 当前是否有可用连接。重连窗口内会返回 false。 */
     fun isConnected(): Boolean = channel?.isActive == true
 
+    /** service 同步过来的在线 client 列表。返回值是快照。 */
+    fun onlineClients(): List<RpcClientInfo> = onlineClients.values
+        .map { it.copy(tags = it.tags.toSet()) }
+        .sortedBy { it.nodeId }
+
+    /** 获取指定 nodeId 的在线 client。 */
+    fun onlineClient(nodeId: String): RpcClientInfo? = onlineClients[nodeId]
+        ?.let { it.copy(tags = it.tags.toSet()) }
+
+    /** 获取拥有指定 tag 的所有在线 client。 */
+    fun onlineClientsByTag(tag: String): List<RpcClientInfo> = onlineClients()
+        .filter { tag in it.tags }
+
     private fun activateChannel(connected: Channel) {
         channel = connected
         reconnectDelayMillis = reconnectInitialDelay.toMillis().coerceAtLeast(1)
@@ -156,8 +175,16 @@ class NettyRpcClient(
             sourceNode = nodeId,
             sourceKind = RpcNodeKind.CLIENT,
             target = RpcTarget.Service,
+            sourceTags = tags,
         )
         activeChannel.writeAndFlush(RpcFrameCodec.encode(hello))
+    }
+
+    private fun applyClientsSync(frame: RpcFrame) {
+        onlineClients.clear()
+        frame.onlineClients.forEach { info ->
+            onlineClients[info.nodeId] = info.copy(tags = info.tags.toSet())
+        }
     }
 
     private fun scheduleReconnect() {
@@ -192,6 +219,11 @@ class NettyRpcClient(
 
     private inner class ClientHandler : SimpleChannelInboundHandler<ByteArray>() {
         override fun channelRead0(ctx: ChannelHandlerContext, msg: ByteArray) {
+            val frame = runCatching { RpcFrameCodec.decode(msg) }.getOrElse { return }
+            if (frame.type == RpcFrameType.CLIENTS_SYNC) {
+                applyClientsSync(frame)
+                return
+            }
             endpoint.receive(connection, msg)
         }
 
@@ -201,8 +233,14 @@ class NettyRpcClient(
                 channel = null
             }
             if (!inactiveChannelIsCurrent || !running.get() || manuallyClosed.get()) return
+            onlineClients.clear()
             endpoint.failPending(RpcException("disconnected", "RPC client disconnected: $nodeId"))
             scheduleReconnect()
         }
     }
 }
+
+private fun Collection<String>.normalizedTags(): Set<String> = asSequence()
+    .map { it.trim() }
+    .filter { it.isNotEmpty() }
+    .toSet()

@@ -26,6 +26,7 @@ client.listen(MyRpc.PING) { ... }
 
 - `RpcTarget.service()`: service 本机处理。
 - `RpcTarget.node(id)`: 指定 node 处理，可以是 service 或某个 client。
+- `RpcTarget.tag(tag)`: 拥有指定 tag 的所有 client 处理，调用端使用 `callAll` 收集响应。
 - `RpcTarget.allClients()`: 所有 client 处理，调用端使用 `callAll` 收集响应。
 - `RpcTarget.all()`: service 和所有 client 都处理，调用端使用 `callAll` 收集响应。
 

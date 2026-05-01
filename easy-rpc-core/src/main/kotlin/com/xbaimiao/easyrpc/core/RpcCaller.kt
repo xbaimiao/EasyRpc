@@ -26,7 +26,7 @@ interface RpcCaller {
     /**
      * 多响应调用。
      *
-     * 目标通常是 [RpcTarget.All] 或 [RpcTarget.AllClients]。
+     * 目标通常是 [RpcTarget.All]、[RpcTarget.AllClients] 或 [RpcTarget.Tag]。
      * 在 [collectFor] 时间窗口内收集所有响应，到期后返回当前已经收到的结果列表。
      */
     fun <A, R> callAll(

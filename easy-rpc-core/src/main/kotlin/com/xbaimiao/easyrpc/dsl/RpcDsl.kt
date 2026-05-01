@@ -64,7 +64,7 @@ class PreparedRpcCall<A, R>(private val method: RpcMethod<A, R>, private val arg
     /**
      * 多响应调用。
      *
-     * 适合 [RpcTarget.all] 和 [RpcTarget.allClients]。
+     * 适合 [RpcTarget.all]、[RpcTarget.allClients] 和 [RpcTarget.tag]。
      * 在 collectFor 时间窗口内收集所有响应，到期后返回列表。
      */
     fun callAll(

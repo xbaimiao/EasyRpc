@@ -8,7 +8,7 @@ option java_outer_classname = "EasyRpcProto";
 // 业务参数不会直接展开成 proto 字段，而是由 Kotlin RpcCodec 编码后写入 payload。
 // 这样 DSL 可以支持 String/Int/List/protobuf 等多种参数组合，同时保留统一的路由元数据。
 message RpcFrame {
-  // REQUEST / RESPONSE / ERROR / HELLO。
+  // REQUEST / RESPONSE / ERROR / HELLO / CLIENTS_SYNC。
   FrameType type = 1;
 
   // 请求 ID。RESPONSE 和 ERROR 必须带回同一个 request_id。
@@ -37,6 +37,12 @@ message RpcFrame {
 
   // 错误消息。只有 ERROR frame 使用。
   string error_message = 10;
+
+  // 发送方 tags。HELLO 会用它声明 client tags，普通 frame 可作为来源元数据。
+  repeated string source_tags = 11;
+
+  // 在线 client 列表。只有 CLIENTS_SYNC frame 使用。
+  repeated RpcClientInfo online_clients = 12;
 }
 
 // 路由目标。
@@ -45,6 +51,15 @@ message RpcTarget {
 
   // TARGET_NODE 时使用，指定目标 nodeId。
   string node_id = 2;
+
+  // TARGET_TAG 时使用，指定目标 tag。
+  string tag = 3;
+}
+
+// 在线 client 元数据。
+message RpcClientInfo {
+  string node_id = 1;
+  repeated string tags = 2;
 }
 
 enum FrameType {
@@ -53,6 +68,7 @@ enum FrameType {
   RESPONSE = 2;
   ERROR = 3;
   HELLO = 4;
+  CLIENTS_SYNC = 5;
 }
 
 enum TargetType {
@@ -60,6 +76,7 @@ enum TargetType {
   TARGET_NODE = 1;
   TARGET_ALL = 2;
   TARGET_ALL_CLIENTS = 3;
+  TARGET_TAG = 4;
 }
 
 enum NodeKind {

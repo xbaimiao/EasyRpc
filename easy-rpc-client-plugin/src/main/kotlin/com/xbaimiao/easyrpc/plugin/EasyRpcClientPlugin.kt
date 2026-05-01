@@ -41,7 +41,11 @@ class EasyRpcClientPlugin : JavaPlugin() {
         val host = config.getString("host", "127.0.0.1") ?: "127.0.0.1"
         val port = config.getInt("port", 29090)
         val nodeId = config.getString("node-id", server.name) ?: server.name
-        val rpcClient = NettyRpcClient(host, port, nodeId).connect()
+        val tags = config.getStringList("tags")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val rpcClient = NettyRpcClient(host, port, nodeId, tags = tags).connect()
         client = rpcClient
         if (rpcClient.isConnected()) {
             logger.info("EasyRpc client connected to $host:$port as $nodeId")

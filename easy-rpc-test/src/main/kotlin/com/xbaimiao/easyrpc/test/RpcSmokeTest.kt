@@ -47,8 +47,8 @@ fun main() {
     server.start()
     println("service started on 127.0.0.1:$port")
 
-    val clientA = NettyRpcClient("127.0.0.1", port, nodeId = "client-a").connect()
-    val clientB = NettyRpcClient("127.0.0.1", port, nodeId = "client-b").connect()
+    val clientA = NettyRpcClient("127.0.0.1", port, nodeId = "client-a", tags = setOf("lobby")).connect()
+    val clientB = NettyRpcClient("127.0.0.1", port, nodeId = "client-b", tags = setOf("lobby", "game")).connect()
 
     SmokeRpc.CLIENT_ECHO.listen(clientA) { text -> "client-a:echo:$text" }
     SmokeRpc.CLIENT_ECHO.listen(clientB) { text -> "client-b:echo:$text" }
@@ -74,6 +74,13 @@ fun main() {
         ).get(3, TimeUnit.SECONDS).sorted()
         println("ALL => ${allNodes.joinToString()}")
 
+        val lobbyNodes = SmokeRpc.CLIENT_ECHO.args("broadcast-lobby").callAll(
+            clientA,
+            RpcTarget.tag("lobby"),
+            Duration.ofMillis(500),
+        ).get(3, TimeUnit.SECONDS).sorted()
+        println("TAG_LOBBY => ${lobbyNodes.joinToString()}")
+
         val sum = SmokeRpc.ADD.args(20, 22).call(clientA, RpcTarget.service()).get(3, TimeUnit.SECONDS)
         println("ADD => $sum")
 
@@ -86,4 +93,3 @@ fun main() {
     }
     server.awaitClose()
 }
-

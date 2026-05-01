@@ -47,7 +47,7 @@ server.awaitClose()
 ## client
 
 ```kotlin
-val client = NettyRpcClient("127.0.0.1", 29090, nodeId = "lobby-1").connect()
+val client = NettyRpcClient("127.0.0.1", 29090, nodeId = "lobby-1", tags = setOf("lobby")).connect()
 
 val result = DemoRpc.PING
     .args("hello")
@@ -57,6 +57,22 @@ val result = DemoRpc.PING
 
 `NettyRpcClient.connect()` 会启动连接生命周期。service 临时不可用或连接中断时，client 会自动重连；
 只有手动调用 `client.close()` 才会停止重连并释放 endpoint、handler 线程池和 Netty event loop。
+
+client 会在 HELLO 中声明自己的 `nodeId` 和 `tags`。service 会保存所有在线 client 信息，并通过
+`CLIENTS_SYNC` 同步给每个 client：
+
+```kotlin
+val clients = client.onlineClients()
+val lobbyClients = client.onlineClientsByTag("lobby")
+val clientInfo = client.onlineClient("lobby-1")
+```
+
+service 侧也可以查询同样的信息：
+
+```kotlin
+val clients = server.onlineClients()
+val lobbyClients = server.onlineClientsByTag("lobby")
+```
 
 ## client 注册 RPC
 
@@ -78,6 +94,7 @@ val result = DemoRpc.PING
 ```kotlin
 RpcTarget.service()        // 调 service 节点
 RpcTarget.node("client-b") // 调指定节点
+RpcTarget.tag("lobby")     // 调所有带 lobby tag 的 client，需要 callAll
 RpcTarget.allClients()     // 调所有 client，需要 callAll
 RpcTarget.all()            // 调 service + 所有 client，需要 callAll
 ```
@@ -88,6 +105,15 @@ RpcTarget.all()            // 调 service + 所有 client，需要 callAll
 val replies = DemoRpc.PING
     .args("broadcast")
     .callAll(client, RpcTarget.allClients(), Duration.ofMillis(500))
+    .get()
+```
+
+按 tag 广播：
+
+```kotlin
+val replies = DemoRpc.PING
+    .args("lobby-broadcast")
+    .callAll(client, RpcTarget.tag("lobby"), Duration.ofMillis(500))
     .get()
 ```
 
@@ -115,6 +141,7 @@ gradle :easy-rpc-test:run
 - client -> 指定 client
 - client -> allClients
 - client -> all
+- client -> tag
 - service 错误返回
 
 预期输出类似：
@@ -125,6 +152,7 @@ SERVICE => service:pong:hello
 CLIENT_B => client-b:echo:direct
 ALL_CLIENTS => client-a:echo:broadcast-client, client-b:echo:broadcast-client
 ALL => client-a:echo:broadcast-all, client-b:echo:broadcast-all, service:echo:broadcast-all
+TAG_LOBBY => client-a:echo:broadcast-lobby, client-b:echo:broadcast-lobby
 ADD => 42
 FAIL => test_error:this is expected
 ```

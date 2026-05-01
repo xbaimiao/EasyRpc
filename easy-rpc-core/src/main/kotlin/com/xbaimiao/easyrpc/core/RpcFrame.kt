@@ -13,6 +13,8 @@ enum class RpcFrameType {
     ERROR,
     /** client 连接 service 后发送的注册包，用于声明自己的 nodeId。 */
     HELLO,
+    /** service 推送在线 client 列表。 */
+    CLIENTS_SYNC,
 }
 
 /**
@@ -32,6 +34,8 @@ data class RpcFrame(
     val payload: ByteArray = ByteArray(0),
     val errorClassifier: String = "",
     val errorMessage: String = "",
+    val sourceTags: Set<String> = emptySet(),
+    val onlineClients: List<RpcClientInfo> = emptyList(),
 )
 
 /** protobuf frame 编解码。 */
@@ -52,6 +56,8 @@ object RpcFrameCodec {
             .setPayload(ByteString.copyFrom(payload))
             .setErrorClassifier(errorClassifier)
             .setErrorMessage(errorMessage)
+            .addAllSourceTags(sourceTags)
+            .addAllOnlineClients(onlineClients.map { it.toProto() })
             .build()
     }
 
@@ -67,6 +73,8 @@ object RpcFrameCodec {
             payload = payload.toByteArray(),
             errorClassifier = errorClassifier,
             errorMessage = errorMessage,
+            sourceTags = sourceTagsList.toSet(),
+            onlineClients = onlineClientsList.map { it.toModel() },
         )
     }
 
@@ -75,6 +83,7 @@ object RpcFrameCodec {
         RpcFrameType.RESPONSE -> EasyRpcProto.FrameType.RESPONSE
         RpcFrameType.ERROR -> EasyRpcProto.FrameType.ERROR
         RpcFrameType.HELLO -> EasyRpcProto.FrameType.HELLO
+        RpcFrameType.CLIENTS_SYNC -> EasyRpcProto.FrameType.CLIENTS_SYNC
     }
 
     private fun EasyRpcProto.FrameType.toModel(): RpcFrameType = when (this) {
@@ -82,6 +91,7 @@ object RpcFrameCodec {
         EasyRpcProto.FrameType.RESPONSE -> RpcFrameType.RESPONSE
         EasyRpcProto.FrameType.ERROR -> RpcFrameType.ERROR
         EasyRpcProto.FrameType.HELLO -> RpcFrameType.HELLO
+        EasyRpcProto.FrameType.CLIENTS_SYNC -> RpcFrameType.CLIENTS_SYNC
         else -> error("Unsupported RPC frame type: $this")
     }
 
@@ -106,6 +116,10 @@ object RpcFrameCodec {
             }
             RpcTarget.All -> builder.setType(EasyRpcProto.TargetType.TARGET_ALL)
             RpcTarget.AllClients -> builder.setType(EasyRpcProto.TargetType.TARGET_ALL_CLIENTS)
+            is RpcTarget.Tag -> {
+                builder.setType(EasyRpcProto.TargetType.TARGET_TAG)
+                builder.setTag(tag)
+            }
         }
         return builder.build()
     }
@@ -115,6 +129,21 @@ object RpcFrameCodec {
         EasyRpcProto.TargetType.TARGET_NODE -> RpcTarget.Node(nodeId)
         EasyRpcProto.TargetType.TARGET_ALL -> RpcTarget.All
         EasyRpcProto.TargetType.TARGET_ALL_CLIENTS -> RpcTarget.AllClients
+        EasyRpcProto.TargetType.TARGET_TAG -> RpcTarget.Tag(tag)
         else -> RpcTarget.Service
+    }
+
+    private fun RpcClientInfo.toProto(): EasyRpcProto.RpcClientInfo {
+        return EasyRpcProto.RpcClientInfo.newBuilder()
+            .setNodeId(nodeId)
+            .addAllTags(tags)
+            .build()
+    }
+
+    private fun EasyRpcProto.RpcClientInfo.toModel(): RpcClientInfo {
+        return RpcClientInfo(
+            nodeId = nodeId,
+            tags = tagsList.toSet(),
+        )
     }
 }
