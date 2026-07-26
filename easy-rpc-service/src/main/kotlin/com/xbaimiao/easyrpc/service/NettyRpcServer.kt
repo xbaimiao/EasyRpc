@@ -15,10 +15,12 @@ import io.netty.handler.codec.LengthFieldBasedFrameDecoder
 import io.netty.handler.codec.LengthFieldPrepender
 import io.netty.handler.codec.bytes.ByteArrayDecoder
 import io.netty.handler.codec.bytes.ByteArrayEncoder
+import io.netty.util.concurrent.ScheduledFuture
 import java.net.InetSocketAddress
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 /**
  * Netty 版 RPC service。
@@ -28,6 +30,9 @@ import java.util.concurrent.ConcurrentHashMap
  * - service 节点：可以自己注册 RPC handler。
  * - router：负责把 client 发来的 frame 转发到 service、指定 client、all 或 allClients。
  * - registry：保存在线 client 的 nodeId/displayName/tags/metadata，并同步给所有 client。
+ *
+ * 连接必须先用 HELLO 完成握手才会被路由。配了 [authToken] 时 HELLO 还要带上匹配的 token，
+ * 否则 service 回一个 `unauthorized` ERROR 并断开连接。
  */
 class NettyRpcServer(
     private val host: String = "0.0.0.0",
@@ -35,6 +40,14 @@ class NettyRpcServer(
     nodeId: String = "service",
     displayName: String? = null,
     metadata: Map<String, String> = emptyMap(),
+    /**
+     * 共享鉴权 token。所有 client 必须在 HELLO 里带上同一个值。
+     *
+     * 留空表示不启用鉴权，任何 client 都能连上，只适合本机开发。
+     */
+    authToken: String = "",
+    /** client 迟迟不发 HELLO 时主动断开的等待时间。 */
+    private val handshakeTimeout: Duration = Duration.ofSeconds(10),
 ) : RpcCaller, RpcRuntime, AutoCloseable {
     /** service 自己的 endpoint。发给 RpcTarget.service() 的请求会进入这里。 */
     override val endpoint = RpcEndpoint(
@@ -46,6 +59,20 @@ class NettyRpcServer(
 
     /** service 节点自己的元数据快照。 */
     val selfInfo: RpcClientInfo get() = endpoint.selfInfo
+
+    private val authToken: String = authToken.trim()
+    private val handshakeTimeoutMillis: Long = handshakeTimeout.toMillis().coerceAtLeast(1)
+
+    /** 是否启用了鉴权。token 为空时返回 false。 */
+    val authEnabled: Boolean get() = authToken.isNotEmpty()
+
+    /**
+     * 鉴权失败回调，参数是 client 声明的 nodeId 和失败原因。
+     *
+     * nodeId 由未授权方自己声明，不可信，打日志时注意这点。
+     */
+    @Volatile
+    var onAuthFailure: ((String, String) -> Unit)? = null
 
     private val bossGroup: EventLoopGroup = NioEventLoopGroup(1)
     private val workerGroup: EventLoopGroup = NioEventLoopGroup()
@@ -196,6 +223,12 @@ class NettyRpcServer(
         }
     }
 
+    /** 校验 client HELLO 带来的 token。没配置 token 时一律放行。 */
+    private fun verifyToken(presented: String): Boolean {
+        if (authToken.isEmpty()) return true
+        return RpcAuth.matches(authToken, presented)
+    }
+
     private fun broadcastClientSync() {
         val sync = RpcFrame(
             type = RpcFrameType.CLIENTS_SYNC,
@@ -212,22 +245,84 @@ class NettyRpcServer(
     private inner class ServerHandler : SimpleChannelInboundHandler<ByteArray>() {
         private var nodeId: String? = null
 
+        /** 是否已经通过 HELLO 完成握手。没握手的连接一个 frame 都不许路由。 */
+        private var authenticated = false
+
+        /** 握手超时任务。连上但迟迟不发 HELLO 的连接会被主动断掉，避免占着 socket。 */
+        private var handshakeTimeoutTask: ScheduledFuture<*>? = null
+
+        override fun channelActive(ctx: ChannelHandlerContext) {
+            super.channelActive(ctx)
+            // authenticated 只在这个 channel 的 event loop 上读写，不需要额外同步。
+            handshakeTimeoutTask = ctx.channel().eventLoop().schedule({
+                if (!authenticated) {
+                    runCatching { ctx.close() }
+                }
+            }, handshakeTimeoutMillis, TimeUnit.MILLISECONDS)
+        }
+
         override fun channelRead0(ctx: ChannelHandlerContext, msg: ByteArray) {
             val frame = runCatching { RpcFrameCodec.decode(msg) }.getOrElse { return }
+
             if (frame.type == RpcFrameType.HELLO) {
-                val info = frame.toClientInfo()
-                nodeId = info.nodeId
-                clients.put(info.nodeId, ClientConnection(ctx.channel(), info))
-                    ?.channel
-                    ?.takeIf { it != ctx.channel() }
-                    ?.close()
-                broadcastClientSync()
+                handleHello(ctx, frame)
                 return
             }
+
+            // 握手之前不接受任何其它 frame，否则未授权连接可以直接调用 RPC。
+            if (!authenticated) {
+                rejectUnauthenticated(ctx, frame, "RPC handshake required before any request")
+                return
+            }
+
             route(frame, ctx.channel())
         }
 
+        private fun handleHello(ctx: ChannelHandlerContext, frame: RpcFrame) {
+            if (!verifyToken(frame.authToken)) {
+                rejectUnauthenticated(ctx, frame, "RPC auth token mismatch")
+                return
+            }
+
+            val info = frame.toClientInfo()
+            if (info.nodeId.isEmpty()) {
+                rejectUnauthenticated(ctx, frame, "RPC nodeId must not be empty")
+                return
+            }
+
+            authenticated = true
+            handshakeTimeoutTask?.cancel(false)
+            handshakeTimeoutTask = null
+            nodeId = info.nodeId
+            clients.put(info.nodeId, ClientConnection(ctx.channel(), info))
+                ?.channel
+                ?.takeIf { it != ctx.channel() }
+                ?.close()
+            broadcastClientSync()
+        }
+
+        /** 回一个 unauthorized ERROR 再断开，让 client 能区分「token 不对」和「service 没起来」。 */
+        private fun rejectUnauthenticated(ctx: ChannelHandlerContext, frame: RpcFrame, reason: String) {
+            val error = RpcFrame(
+                type = RpcFrameType.ERROR,
+                requestId = frame.requestId,
+                sourceNode = endpoint.nodeId,
+                sourceKind = RpcNodeKind.SERVICE,
+                sourceDisplayName = endpoint.displayName,
+                target = RpcTarget.Node(frame.sourceNode),
+                group = frame.group,
+                method = frame.method,
+                errorClassifier = RPC_ERROR_UNAUTHORIZED,
+                errorMessage = reason,
+            )
+            runCatching { ctx.writeAndFlush(RpcFrameCodec.encode(error)) }
+            onAuthFailure?.invoke(frame.sourceNode, reason)
+            runCatching { ctx.close() }
+        }
+
         override fun channelInactive(ctx: ChannelHandlerContext) {
+            handshakeTimeoutTask?.cancel(false)
+            handshakeTimeoutTask = null
             val disconnectedNodeId = nodeId ?: return
             val current = clients[disconnectedNodeId]
             val removed = current != null && current.channel == ctx.channel() && clients.remove(disconnectedNodeId, current)

@@ -39,6 +39,9 @@ import kotlin.math.min
  * client 除了 [nodeId] 还可以声明 [displayName] 和 [metadata]，它们会随 HELLO 上报给 service，
  * 再由 service 同步给所有 client；handler 里也能从 `RpcSource` 直接读到调用方的这些字段。
  *
+ * service 配了鉴权时必须传入匹配的 [authToken]，否则握手会被拒绝。
+ * token 被拒后 client 会停止自动重连并回调 [onAuthFailure]，改好配置后用 [retryAuth] 重新连接。
+ *
  * 只有手动调用 [close] 才会彻底释放资源；网络断线会保留 endpoint 和 listen handler，
  * 并按 1s、2s、4s ... 最大 30s 的退避间隔自动重连。
  */
@@ -51,6 +54,8 @@ class NettyRpcClient(
     tags: Collection<String> = emptySet(),
     displayName: String? = null,
     metadata: Map<String, String> = emptyMap(),
+    /** 共享鉴权 token，必须和 service 配置的一致。留空表示 service 侧没启用鉴权。 */
+    authToken: String = "",
 ) : RpcCaller, RpcRuntime, AutoCloseable {
     /** 当前 client 的 endpoint。handler 和 pending 请求都存在这里。 */
     override val endpoint = RpcEndpoint(
@@ -73,9 +78,24 @@ class NettyRpcClient(
     /** 当前 client 的自定义元数据。 */
     val metadata: Map<String, String> get() = endpoint.selfInfo.metadata
 
+    /** 当前使用的 token。可以通过 [retryAuth] 换成新值，不需要重建整个 client。 */
+    @Volatile
+    private var authToken: String = authToken.trim()
+
+    /**
+     * 鉴权失败回调，参数是 service 返回的原因。
+     *
+     * 触发后 client 会停止自动重连，需要改好 token 再调用 [retryAuth]。
+     * SDK 本身不打日志，宿主（比如插件）应该在这里把失败信息写进自己的 logger。
+     */
+    @Volatile
+    var onAuthFailure: ((String) -> Unit)? = null
+
     private val group: EventLoopGroup = NioEventLoopGroup()
     private val running = AtomicBoolean(false)
     private val manuallyClosed = AtomicBoolean(false)
+    /** token 被 service 拒绝。置位后不再自动重连，避免拿同一个错 token 死循环。 */
+    private val authRejected = AtomicBoolean(false)
     private val connecting = AtomicBoolean(false)
     private val reconnectScheduled = AtomicBoolean(false)
     private val onlineClients = ConcurrentHashMap<String, RpcClientInfo>()
@@ -133,6 +153,7 @@ class NettyRpcClient(
         timeout: Duration,
     ): CompletableFuture<R> {
         check(running.get()) { "RPC client is not connected" }
+        check(!authRejected.get()) { "RPC client auth was rejected by service: $nodeId" }
         check(isConnected()) { "RPC client is reconnecting: $nodeId" }
         return endpoint.call(connection, method, args, target, timeout)
     }
@@ -145,6 +166,7 @@ class NettyRpcClient(
         collectFor: Duration,
     ): CompletableFuture<List<R>> {
         check(running.get()) { "RPC client is not connected" }
+        check(!authRejected.get()) { "RPC client auth was rejected by service: $nodeId" }
         check(isConnected()) { "RPC client is reconnecting: $nodeId" }
         return endpoint.callMany(connection, method, args, target, collectFor)
     }
@@ -234,6 +256,7 @@ class NettyRpcClient(
             sourceTags = info.tags,
             sourceDisplayName = info.displayName,
             sourceMetadata = info.metadata,
+            authToken = authToken,
         )
         activeChannel.writeAndFlush(RpcFrameCodec.encode(hello))
     }
@@ -244,8 +267,41 @@ class NettyRpcClient(
         onlineClients.putAll(synced)
     }
 
+    /**
+     * service 拒绝了 token。
+     *
+     * 停掉自动重连并让 pending 请求立刻失败。token 是配置问题，重试一万次也还是错的，
+     * 与其无限刷日志，不如停下来等人改配置。
+     */
+    private fun handleAuthFailure(reason: String) {
+        if (!authRejected.compareAndSet(false, true)) return
+        endpoint.failPending(RpcException(RPC_ERROR_UNAUTHORIZED, reason))
+        onlineClients.clear()
+        onAuthFailure?.invoke(reason)
+    }
+
+    /**
+     * 换一个 token 重新尝试连接。
+     *
+     * 用于 token 被拒之后运维改好配置、执行 reload 的场景，不需要重建整个 client，
+     * 已经注册的 listen handler 都能保留。返回 false 表示 client 已关闭或当前并没有被拒。
+     */
+    fun retryAuth(newToken: String = authToken): Boolean {
+        if (!running.get() || manuallyClosed.get()) return false
+        if (!authRejected.compareAndSet(true, false)) return false
+        authToken = newToken.trim()
+        reconnectDelayMillis = reconnectInitialDelay.toMillis().coerceAtLeast(1)
+        connectAsync()
+        return true
+    }
+
+    /** token 是否已经被 service 拒绝。true 表示不会再自动重连。 */
+    fun isAuthRejected(): Boolean = authRejected.get()
+
     private fun scheduleReconnect() {
         if (!running.get() || manuallyClosed.get()) return
+        // token 被拒时不再重连。
+        if (authRejected.get()) return
         if (!reconnectScheduled.compareAndSet(false, true)) return
 
         val delay = reconnectDelayMillis
@@ -279,6 +335,12 @@ class NettyRpcClient(
             val frame = runCatching { RpcFrameCodec.decode(msg) }.getOrElse { return }
             if (frame.type == RpcFrameType.CLIENTS_SYNC) {
                 applyClientsSync(frame)
+                return
+            }
+            // service 拒绝握手时会回 unauthorized ERROR，这类错误不属于某个 pending 请求，
+            // 必须在这里单独处理，否则会被 endpoint 当成找不到 requestId 直接丢掉。
+            if (frame.type == RpcFrameType.ERROR && frame.errorClassifier == RPC_ERROR_UNAUTHORIZED) {
+                handleAuthFailure(frame.errorMessage)
                 return
             }
             endpoint.receive(connection, msg)

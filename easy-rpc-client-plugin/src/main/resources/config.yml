@@ -1,6 +1,11 @@
 host: 127.0.0.1
 port: 29090
 
+# 共享鉴权 token，必须和 service 的 easyrpc-service.yml 里的 auth-token 完全一致。
+# service 首次启动时会随机生成一个，复制过来填在这里。
+# 填错会被 service 拒绝并停止自动重连，改好之后执行 /easyrpc reconnect。
+auth-token: ''
+
 # 本节点唯一 ID，路由靠它，整个集群不能重复
 node-id: bukkit-client
 

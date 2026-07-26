@@ -31,6 +31,11 @@ class EasyRpcClientPlugin : JavaPlugin() {
             }
         }
         registerPlaceholders()
+        getCommand("easyrpc")?.let {
+            val executor = EasyRpcCommand(this)
+            it.setExecutor(executor)
+            it.tabCompleter = executor
+        }
     }
 
     override fun onDisable() {
@@ -50,6 +55,10 @@ class EasyRpcClientPlugin : JavaPlugin() {
         val tags = config.getStringList("tags").normalizedTags()
         val displayName = config.getString("display-name")?.trim()?.takeIf { it.isNotEmpty() }
         val metadata = readMetadata()
+        val authToken = config.getString("auth-token")?.trim() ?: ""
+        if (authToken.isEmpty()) {
+            logger.warning("EasyRpc auth-token is empty; this only works if the service has auth disabled")
+        }
         val rpcClient = NettyRpcClient(
             host = host,
             port = port,
@@ -57,7 +66,13 @@ class EasyRpcClientPlugin : JavaPlugin() {
             tags = tags,
             displayName = displayName,
             metadata = metadata,
-        ).connect()
+            authToken = authToken,
+        )
+        rpcClient.onAuthFailure = { reason ->
+            logger.severe("EasyRpc auth rejected by service: $reason")
+            logger.severe("Fix auth-token in config.yml, then run: /easyrpc reconnect")
+        }
+        rpcClient.connect()
         client = rpcClient
         val identity = "$nodeId (${rpcClient.displayName})"
         if (rpcClient.isConnected()) {
@@ -72,6 +87,30 @@ class EasyRpcClientPlugin : JavaPlugin() {
     fun disconnect() {
         client?.close()
         client = null
+    }
+
+    /**
+     * 重新读取 config.yml 里的 auth-token 并重连。
+     *
+     * 这里必须走 [NettyRpcClient.retryAuth] 而不是 disconnect + connect：
+     * 其它插件把 handler 注册在当前 client 的 endpoint 上，重建 client 会把这些 handler 全丢掉。
+     */
+    fun reloadAuth(): String {
+        val rpcClient = client ?: return "EasyRpc client 未启动，请使用 /easyrpc connect"
+        reloadConfig()
+        val newToken = config.getString("auth-token")?.trim() ?: ""
+        if (!rpcClient.isAuthRejected()) {
+            return if (rpcClient.isConnected()) {
+                "EasyRpc 当前已连接，无需重连"
+            } else {
+                "EasyRpc 正在自动重连中，不是鉴权问题"
+            }
+        }
+        return if (rpcClient.retryAuth(newToken)) {
+            "EasyRpc 已用新 token 重新连接，请查看控制台日志确认结果"
+        } else {
+            "EasyRpc 重连失败，client 可能已关闭"
+        }
     }
 
     /**

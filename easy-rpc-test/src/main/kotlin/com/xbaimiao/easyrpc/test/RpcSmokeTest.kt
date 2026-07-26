@@ -2,14 +2,24 @@
 
 import com.xbaimiao.easyrpc.client.NettyRpcClient
 import com.xbaimiao.easyrpc.codec.RpcCodecs
+import com.xbaimiao.easyrpc.core.RPC_ERROR_UNAUTHORIZED
 import com.xbaimiao.easyrpc.core.RpcException
+import com.xbaimiao.easyrpc.core.RpcFrame
+import com.xbaimiao.easyrpc.core.RpcFrameCodec
+import com.xbaimiao.easyrpc.core.RpcFrameType
+import com.xbaimiao.easyrpc.core.RpcNodeKind
 import com.xbaimiao.easyrpc.core.RpcTarget
 import com.xbaimiao.easyrpc.dsl.BuiltinRpc
 import com.xbaimiao.easyrpc.dsl.RpcGroup
 import com.xbaimiao.easyrpc.service.NettyRpcServer
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.net.Socket
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+
 
 object SmokeRpc : RpcGroup("smoke") {
     val ADD = rpc("add")
@@ -24,7 +34,16 @@ object SmokeRpc : RpcGroup("smoke") {
 
 fun main() {
     val port = 29190
-    val server = NettyRpcServer(host = "127.0.0.1", port = port, nodeId = "service")
+    val token = "smoke-test-token-1234567890"
+    val server = NettyRpcServer(
+        host = "127.0.0.1",
+        port = port,
+        nodeId = "service",
+        authToken = token,
+    )
+    server.onAuthFailure = { nodeId, reason ->
+        println("AUTH_REJECTED_BY_SERVICE => claimedNodeId=$nodeId reason=$reason")
+    }
 
     BuiltinRpc.PING.listen(server) { text ->
         "service:pong:$text"
@@ -49,6 +68,7 @@ fun main() {
         tags = setOf("lobby"),
         displayName = "大厅一号",
         metadata = mapOf("version" to "1.20.4", "region" to "cn-east"),
+        authToken = token,
     ).connect()
     val clientB = NettyRpcClient(
         "127.0.0.1",
@@ -57,6 +77,7 @@ fun main() {
         tags = setOf("lobby", "game"),
         displayName = "生存服",
         metadata = mapOf("version" to "1.21.1"),
+        authToken = token,
     ).connect()
 
     BuiltinRpc.PING.listen(clientA) {
@@ -97,7 +118,93 @@ fun main() {
         Thread.sleep(300)
         println("更新后 service 看到的 client-a => " + server.onlineClient("client-a"))
         println("更新后 clientB 看到的 client-a => " + clientB.onlineClient("client-a"))
+
+        println("-- 鉴权 --")
+        println("service authEnabled => ${server.authEnabled}")
+        verifyAuth(port, token)
     } finally {
     }
     server.awaitClose()
+}
+
+/**
+ * 验证没握手就发 REQUEST 会被拒。
+ *
+ * 这是鉴权真正的边界，必须绕开 SDK 用裸 socket 打，因为 SDK 一定会先发 HELLO。
+ */
+private fun verifyHandshakeRequired(port: Int) {
+    Socket("127.0.0.1", port).use { socket ->
+        socket.soTimeout = 5000
+        val request = RpcFrame(
+            type = RpcFrameType.REQUEST,
+            requestId = 1,
+            sourceNode = "attacker",
+            sourceKind = RpcNodeKind.CLIENT,
+            target = RpcTarget.Service,
+            group = "builtin",
+            method = "ping",
+        )
+        val payload = RpcFrameCodec.encode(request)
+
+        val out = DataOutputStream(socket.getOutputStream())
+        out.writeInt(payload.size)
+        out.write(payload)
+        out.flush()
+
+        val input = DataInputStream(socket.getInputStream())
+        val response = runCatching {
+            val size = input.readInt()
+            val bytes = ByteArray(size)
+            input.readFully(bytes)
+            RpcFrameCodec.decode(bytes)
+        }.getOrNull()
+
+        println("未握手直接发 REQUEST => classifier=${response?.errorClassifier} message=${response?.errorMessage}")
+        println("是否被拒 => ${response?.errorClassifier == RPC_ERROR_UNAUTHORIZED}")
+    }
+}
+
+/** 验证错 token 会被拒、改对 token 后 retryAuth 能恢复。 */
+private fun verifyAuth(port: Int, correctToken: String) {
+    val rejected = CountDownLatch(1)
+    val badClient = NettyRpcClient(
+        "127.0.0.1",
+        port,
+        nodeId = "client-bad",
+        authToken = "wrong-token",
+    )
+    badClient.onAuthFailure = { reason ->
+        println("BAD_TOKEN_REJECTED => $reason")
+        rejected.countDown()
+    }
+    badClient.connect()
+
+    val gotRejection = rejected.await(5, TimeUnit.SECONDS)
+    println("错 token 是否被拒 => $gotRejection")
+    println("isAuthRejected => ${badClient.isAuthRejected()}")
+
+    // 被拒之后不应该还能发请求。
+    val callBlocked = runCatching {
+        BuiltinRpc.PING.args("should-not-work").call(badClient, RpcTarget.service()).get(2, TimeUnit.SECONDS)
+    }.isFailure
+    println("被拒后调用是否被阻止 => $callBlocked")
+
+    verifyHandshakeRequired(port)
+
+    // 换成正确 token 重连，handler 和 endpoint 都保留。
+    BuiltinRpc.PING.listen(badClient) { "recovered:$it" }
+    badClient.retryAuth(correctToken)
+    val deadline = System.currentTimeMillis() + 5000
+    while (!badClient.isConnected() && System.currentTimeMillis() < deadline) {
+        Thread.sleep(100)
+    }
+    val reconnected = badClient.isConnected()
+    println("换对 token 后是否连上 => $reconnected")
+    if (reconnected) {
+        val ping = runCatching {
+            BuiltinRpc.PING.args("after-retry").call(badClient, RpcTarget.service()).get(3, TimeUnit.SECONDS)
+        }
+        println("恢复后调用 => ${ping.getOrElse { "失败: ${it.message}" }}")
+    }
+    badClient.close()
 }

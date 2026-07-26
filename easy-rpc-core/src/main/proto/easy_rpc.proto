@@ -49,6 +49,9 @@ message RpcFrame {
 
   // 发送方自定义元数据。HELLO 会用它声明 client metadata，普通 frame 可作为来源元数据。
   map<string, string> source_metadata = 14;
+
+  // 鉴权 token。只有 HELLO 会带，service 校验通过后按连接记住结果，后续 frame 不再重复携带。
+  string auth_token = 15;
 }
 
 // 路由目标。

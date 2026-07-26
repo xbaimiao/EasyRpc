@@ -38,6 +38,8 @@ data class RpcFrame(
     val onlineClients: List<RpcClientInfo> = emptyList(),
     val sourceDisplayName: String = "",
     val sourceMetadata: Map<String, String> = emptyMap(),
+    /** 鉴权 token，只有 HELLO 使用。不要打进日志。 */
+    val authToken: String = "",
 )
 
 /** 把 frame 里的来源元数据整理成 [RpcSource]，displayName 为空时回退成 sourceNode。 */
@@ -79,6 +81,7 @@ object RpcFrameCodec {
             .addAllOnlineClients(onlineClients.map { it.toProto() })
             .setSourceDisplayName(sourceDisplayName)
             .putAllSourceMetadata(sourceMetadata)
+            .setAuthToken(authToken)
             .build()
     }
 
@@ -98,6 +101,7 @@ object RpcFrameCodec {
             onlineClients = onlineClientsList.map { it.toModel() },
             sourceDisplayName = sourceDisplayName,
             sourceMetadata = sourceMetadataMap.toMap(),
+            authToken = authToken,
         )
     }
 
