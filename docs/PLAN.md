@@ -44,11 +44,16 @@ client.listen(MyRpc.PING) { ... }
 - 校验按连接进行，通过后记在 handler 状态里，后续 frame 不再重复携带 token。
 - 比较走 `RpcAuth.matches`（`MessageDigest.isEqual`），避免 `==` 短路比较导致的时序侧信道。
 - 未握手的连接不允许路由任何 frame；连上不发 HELLO 的连接 10 秒后断开。
+- frame 的 `sourceNode` 必须和连接握手时的 nodeId 一致，已握手连接重发 HELLO 不能换 nodeId，
+  避免持有 token 的一方伪造来源或顶掉别的在线节点。拒绝时用 `source_mismatch` 而不是
+  `unauthorized`，且只写回发起方本身——否则错误会被路由到被冒充的节点，把受害者的
+  client 打成「鉴权失败、停止重连」。
 - 失败时回 `unauthorized` ERROR 并断开，client 停止自动重连，等运维改配置后 `retryAuth`。
 - token 为空表示关闭鉴权，仅用于本机开发，启动时打 WARNING。
 
-明确不在这一层解决的：传输加密、按节点的细粒度授权、重放攻击。
-这些要靠 mTLS 或 HMAC 挑战握手，目前没做。
+明确不在这一层解决的：传输加密、按节点的细粒度授权、重放攻击、同 token 内的身份冒用
+（拿到 token 就能用任意未占用的 nodeId 接入，已在线的还会被顶掉）。
+这些要靠每节点独立 token 或 mTLS，目前没做。
 
 ## 后续扩展
 

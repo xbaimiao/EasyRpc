@@ -319,13 +319,28 @@ service 启动时会打一条明显的 WARNING 提醒。
 之前未握手的连接就能直接发 REQUEST 调用任意 RPC，现在会收到 `unauthorized` 并被断开。
 连上但迟迟不发 HELLO 的连接会在 10 秒后被主动断开，避免占着 socket 不放。
 
+### sourceNode 的可信度
+
+service 会校验 frame 里的 `sourceNode` 和这条连接握手时声明的 nodeId 一致，不一致直接拒掉
+（classifier `source_mismatch`）。已握手的连接重发 HELLO 也只能更新自己的元数据，不能换 nodeId。
+
+所以 handler 里 `RpcSource.nodeId` 可以确信是「某个持有正确 token 的连接，且它就是自己声明的那个 nodeId」。
+
+但要注意这个保证的边界：**它不能证明对方是你想的那台机器**。共享 token 模式下，
+任何拿到 token 的人都可以用任意未被占用的 nodeId 连上来；如果目标 nodeId 已经在线，
+新连接还会把旧连接顶掉（这是重连覆盖注册表的必然结果，半开连接场景需要它）。
+
+也就是说 `nodeId` 可以用来做业务路由和展示，**不适合当作权限判断的唯一依据**。
+`displayName`、`tags`、`metadata` 同理，都是节点自己声明的，可信度不高于 token 本身。
+
 ### 这套机制不解决什么
 
 - **不加密传输**，见 [网络和安全](#4-网络和安全)。
 - **不区分节点权限**，token 对了就能调用所有已注册的 RPC，没有按 nodeId 或 tag 的细粒度授权。
 - **不防重放**，token 是固定值而非一次性挑战，能抓到包就能拿 token 自己连上来。
+- **不防同 token 内的身份冒用**，见上面 sourceNode 那节。
 
-真要抗这些，得上 mTLS 或 HMAC 挑战握手，目前没做。
+真要抗这些，得给每个节点独立 token 或上 mTLS，目前没做。
 
 ## 部署
 

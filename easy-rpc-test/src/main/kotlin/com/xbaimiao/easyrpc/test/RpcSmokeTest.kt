@@ -121,6 +121,14 @@ fun main() {
 
         println("-- 鉴权 --")
         println("service authEnabled => ${server.authEnabled}")
+        verifySourceSpoofRejected(port, token)
+
+        // 被冒充的 client-a 不应该受到任何影响。
+        val victimStillOk = runCatching {
+            BuiltinRpc.PING.args("victim-alive").call(clientA, RpcTarget.service()).get(3, TimeUnit.SECONDS)
+        }
+        println("被冒充方是否仍正常 => ${clientA.isConnected()} / ${victimStillOk.getOrElse { "失败: ${it.message}" }}")
+
         verifyAuth(port, token)
     } finally {
     }
@@ -161,6 +169,68 @@ private fun verifyHandshakeRequired(port: Int) {
 
         println("未握手直接发 REQUEST => classifier=${response?.errorClassifier} message=${response?.errorMessage}")
         println("是否被拒 => ${response?.errorClassifier == RPC_ERROR_UNAUTHORIZED}")
+    }
+}
+
+/**
+ * 验证持有正确 token 也不能伪造 sourceNode。
+ *
+ * 用裸 socket：先正常握手成 spoofer，再发一个 sourceNode 填成 client-a 的 REQUEST。
+ * 关键是错误必须回给发起方自己，而不是被路由到被冒充的 client-a 去。
+ */
+private fun verifySourceSpoofRejected(port: Int, token: String) {
+    Socket("127.0.0.1", port).use { socket ->
+        socket.soTimeout = 5000
+        val out = DataOutputStream(socket.getOutputStream())
+        val input = DataInputStream(socket.getInputStream())
+
+        fun send(frame: RpcFrame) {
+            val bytes = RpcFrameCodec.encode(frame)
+            out.writeInt(bytes.size)
+            out.write(bytes)
+            out.flush()
+        }
+
+        fun receive(): RpcFrame? = runCatching {
+            val size = input.readInt()
+            val bytes = ByteArray(size)
+            input.readFully(bytes)
+            RpcFrameCodec.decode(bytes)
+        }.getOrNull()
+
+        send(
+            RpcFrame(
+                type = RpcFrameType.HELLO,
+                requestId = 0,
+                sourceNode = "spoofer",
+                sourceKind = RpcNodeKind.CLIENT,
+                target = RpcTarget.Service,
+                authToken = token,
+            )
+        )
+        // 握手成功后 service 会广播 CLIENTS_SYNC，先把它读掉。
+        val sync = receive()
+        println("spoofer 握手 => ${sync?.type}")
+
+        send(
+            RpcFrame(
+                type = RpcFrameType.REQUEST,
+                requestId = 99,
+                sourceNode = "client-a",
+                sourceKind = RpcNodeKind.CLIENT,
+                target = RpcTarget.Service,
+                group = "builtin",
+                method = "ping",
+            )
+        )
+        var reply = receive()
+        // 可能还夹着别的 CLIENTS_SYNC，跳到 ERROR 为止。
+        var guard = 0
+        while (reply != null && reply.type != RpcFrameType.ERROR && guard++ < 5) {
+            reply = receive()
+        }
+        println("伪造 sourceNode => classifier=${reply?.errorClassifier} message=${reply?.errorMessage}")
+        println("是否被拒 => ${reply?.errorClassifier == "source_mismatch"}")
     }
 }
 

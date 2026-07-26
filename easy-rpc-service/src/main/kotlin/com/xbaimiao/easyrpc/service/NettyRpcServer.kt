@@ -275,6 +275,17 @@ class NettyRpcServer(
                 return
             }
 
+            // sourceNode 必须和这条连接握手时声明的 nodeId 一致。
+            // 否则任何持有 token 的节点都能把 sourceNode 填成别人，让 handler 读到的
+            // RpcSource.nodeId 变成伪造值，响应也会被路由到被冒充的节点去。
+            val authenticatedNodeId = nodeId
+            if (authenticatedNodeId != null && frame.sourceNode != authenticatedNodeId) {
+                // 注意不能走 sendRouteError：它按 frame.sourceNode 找回程连接，而这里
+                // sourceNode 正是伪造的，错误会被发给被冒充的节点，反而把受害者打下线。
+                rejectSpoofedSource(ctx, frame, authenticatedNodeId)
+                return
+            }
+
             route(frame, ctx.channel())
         }
 
@@ -290,6 +301,15 @@ class NettyRpcServer(
                 return
             }
 
+            // 已经握手过的连接重发 HELLO 只允许更新自己的元数据，不允许换 nodeId。
+            // 合法的 updateSelfInfo 一定用同一个 nodeId；允许换的话，一条已认证连接
+            // 就能顶掉任意在线节点的注册。
+            val currentNodeId = nodeId
+            if (currentNodeId != null && info.nodeId != currentNodeId) {
+                rejectSpoofedSource(ctx, frame, currentNodeId)
+                return
+            }
+
             authenticated = true
             handshakeTimeoutTask?.cancel(false)
             handshakeTimeoutTask = null
@@ -299,6 +319,29 @@ class NettyRpcServer(
                 ?.takeIf { it != ctx.channel() }
                 ?.close()
             broadcastClientSync()
+        }
+
+        /**
+         * 拒绝伪造 sourceNode 的 frame。
+         *
+         * 只把错误写回发起这条 frame 的连接本身，不按 sourceNode 路由。
+         * classifier 用普通 internal_error 而不是 unauthorized：后者会让收到的 client
+         * 停止重连，而这里的 client 端并没有配置问题，不该被停掉。
+         */
+        private fun rejectSpoofedSource(ctx: ChannelHandlerContext, frame: RpcFrame, expectedNodeId: String) {
+            val error = RpcFrame(
+                type = RpcFrameType.ERROR,
+                requestId = frame.requestId,
+                sourceNode = endpoint.nodeId,
+                sourceKind = RpcNodeKind.SERVICE,
+                sourceDisplayName = endpoint.displayName,
+                target = RpcTarget.Node(expectedNodeId),
+                group = frame.group,
+                method = frame.method,
+                errorClassifier = "source_mismatch",
+                errorMessage = "RPC sourceNode mismatch: connection authenticated as $expectedNodeId",
+            )
+            runCatching { ctx.writeAndFlush(RpcFrameCodec.encode(error)) }
         }
 
         /** 回一个 unauthorized ERROR 再断开，让 client 能区分「token 不对」和「service 没起来」。 */
