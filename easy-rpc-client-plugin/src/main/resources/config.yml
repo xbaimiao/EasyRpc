@@ -6,24 +6,29 @@ port: 29090
 # 填错会被 service 拒绝并停止自动重连，改好之后执行 /easyrpc reconnect。
 auth-token: ''
 
-# 本节点唯一 ID，路由靠它，整个集群不能重复
-node-id: bukkit-client
+# 本节点唯一 ID，路由靠它，整个集群不能重复。
+# 留空则使用服务器名。多个服务器共用同一个 node-id 会互相顶下线。
+node-id: ''
 
-# 显示名称，给人看的，留空则回退成 node-id
-display-name: '大厅一号'
+# 显示名称，给人看的，留空则回退成 node-id。
+# 例: display-name: '大厅一号'
+display-name: ''
 
-# 标签，可以用 RpcTarget.tag("lobby") 一次调用所有同 tag 的节点
-tags:
-  - lobby
-  - hub
+# 标签，可以用 RpcTarget.tag("xxx") 一次调用所有同 tag 的节点。
+# 例:
+# tags:
+#   - lobby
+#   - hub
+tags: []
 
 # 自定义元数据。键值含义完全由你自己约定，会随 HELLO 上报给 service，
 # 再同步给所有 client；service 和其它 client 都能读到。
 # 值统一按字符串处理，写数字或 true/false 也会转成字符串。
-metadata:
-  version: '1.20.4'
-  region: cn-east
-  max-players: 200
-  whitelist: false
+# 例:
+# metadata:
+#   version: '1.20.4'
+#   region: cn-east
+#   max-players: 200
+metadata: {}
 
 connect-on-enable: true

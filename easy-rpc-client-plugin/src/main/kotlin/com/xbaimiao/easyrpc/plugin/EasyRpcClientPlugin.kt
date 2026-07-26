@@ -51,7 +51,9 @@ class EasyRpcClientPlugin : JavaPlugin() {
         client?.let { return it }
         val host = config.getString("host", "127.0.0.1") ?: "127.0.0.1"
         val port = config.getInt("port", 29090)
-        val nodeId = config.getString("node-id", server.name) ?: server.name
+        // 注意 getString 的默认值只在键缺失时生效，空字符串会原样返回，所以要自己兜一次。
+        val nodeId = config.getString("node-id")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: server.name
         val tags = config.getStringList("tags").normalizedTags()
         val displayName = config.getString("display-name")?.trim()?.takeIf { it.isNotEmpty() }
         val metadata = readMetadata()
