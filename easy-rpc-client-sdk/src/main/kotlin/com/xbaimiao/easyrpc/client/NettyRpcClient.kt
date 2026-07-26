@@ -36,6 +36,9 @@ import kotlin.math.min
  * - 可以注册自己的 handler，被 service 或其它 client 调用。
  * - 可以通过 [onlineClients] 或 [onlineClientsByTag] 查询 service 同步的在线 client。
  *
+ * client 除了 [nodeId] 还可以声明 [displayName] 和 [metadata]，它们会随 HELLO 上报给 service，
+ * 再由 service 同步给所有 client；handler 里也能从 `RpcSource` 直接读到调用方的这些字段。
+ *
  * 只有手动调用 [close] 才会彻底释放资源；网络断线会保留 endpoint 和 listen handler，
  * 并按 1s、2s、4s ... 最大 30s 的退避间隔自动重连。
  */
@@ -46,10 +49,30 @@ class NettyRpcClient(
     private val reconnectInitialDelay: Duration = Duration.ofSeconds(1),
     private val reconnectMaxDelay: Duration = Duration.ofSeconds(30),
     tags: Collection<String> = emptySet(),
+    displayName: String? = null,
+    metadata: Map<String, String> = emptyMap(),
 ) : RpcCaller, RpcRuntime, AutoCloseable {
     /** 当前 client 的 endpoint。handler 和 pending 请求都存在这里。 */
-    override val endpoint = RpcEndpoint(nodeId, RpcNodeKind.CLIENT, nodeTags = tags.normalizedTags())
-    val tags: Set<String> = tags.normalizedTags()
+    override val endpoint = RpcEndpoint(
+        nodeId = nodeId,
+        nodeKind = RpcNodeKind.CLIENT,
+        nodeTags = tags.normalizedTags(),
+        nodeDisplayName = displayName,
+        nodeMetadata = metadata,
+    )
+
+    /** 当前 client 自己的元数据快照，包含 nodeId、displayName、tags 和 metadata。 */
+    val selfInfo: RpcClientInfo get() = endpoint.selfInfo
+
+    /** 当前 client 的 tags。 */
+    val tags: Set<String> get() = endpoint.selfInfo.tags
+
+    /** 当前 client 的显示名称，没声明时等于 [nodeId]。 */
+    val displayName: String get() = endpoint.selfInfo.displayName
+
+    /** 当前 client 的自定义元数据。 */
+    val metadata: Map<String, String> get() = endpoint.selfInfo.metadata
+
     private val group: EventLoopGroup = NioEventLoopGroup()
     private val running = AtomicBoolean(false)
     private val manuallyClosed = AtomicBoolean(false)
@@ -150,17 +173,49 @@ class NettyRpcClient(
     fun isConnected(): Boolean = channel?.isActive == true
 
     /** service 同步过来的在线 client 列表。返回值是快照。 */
-    fun onlineClients(): List<RpcClientInfo> = onlineClients.values
-        .map { it.copy(tags = it.tags.toSet()) }
-        .sortedBy { it.nodeId }
+    fun onlineClients(): List<RpcClientInfo> = onlineClients.values.sortedBy { it.nodeId }
 
     /** 获取指定 nodeId 的在线 client。 */
     fun onlineClient(nodeId: String): RpcClientInfo? = onlineClients[nodeId]
-        ?.let { it.copy(tags = it.tags.toSet()) }
+
+    /** 获取指定 nodeId 的显示名称，节点不在线时返回 null。 */
+    fun displayNameOf(nodeId: String): String? = onlineClients[nodeId]?.displayName
+
+    /** 获取指定 nodeId 的 tags，节点不在线时返回空集合。 */
+    fun tagsOf(nodeId: String): Set<String> = onlineClients[nodeId]?.tags ?: emptySet()
+
+    /** 获取指定 nodeId 的单个 metadata 值，节点不在线或没这个键时返回 null。 */
+    fun metadataOf(nodeId: String, key: String): String? = onlineClients[nodeId]?.metadata?.get(key)
+
+    /** 当前在线 client 的 nodeId 列表。 */
+    fun onlineNodeIds(): List<String> = onlineClients.keys.sorted()
 
     /** 获取拥有指定 tag 的所有在线 client。 */
     fun onlineClientsByTag(tag: String): List<RpcClientInfo> = onlineClients()
         .filter { tag in it.tags }
+
+    /**
+     * 运行期更新自己的 displayName / tags / metadata，只传需要改的参数。
+     *
+     * 更新后会立刻重发 HELLO，让 service 覆盖注册表并把新值同步给其它 client。
+     * 断线期间调用不会报错，新值会在下一次重连的 HELLO 里带上。
+     */
+    fun updateSelfInfo(
+        tags: Collection<String>? = null,
+        displayName: String? = null,
+        metadata: Map<String, String>? = null,
+    ): RpcClientInfo {
+        val updated = endpoint.updateSelfInfo(tags, displayName, metadata)
+        channel?.takeIf { it.isActive }?.let { sendHello(it) }
+        return updated
+    }
+
+    /** 只更新单个 metadata 键。value 传 null 表示删除这个键。 */
+    fun updateMetadata(key: String, value: String?): RpcClientInfo {
+        val merged = endpoint.selfInfo.metadata.toMutableMap()
+        if (value == null) merged.remove(key) else merged[key] = value
+        return updateSelfInfo(metadata = merged)
+    }
 
     private fun activateChannel(connected: Channel) {
         channel = connected
@@ -169,22 +224,24 @@ class NettyRpcClient(
     }
 
     private fun sendHello(activeChannel: Channel) {
+        val info = endpoint.selfInfo
         val hello = RpcFrame(
             type = RpcFrameType.HELLO,
             requestId = 0,
             sourceNode = nodeId,
             sourceKind = RpcNodeKind.CLIENT,
             target = RpcTarget.Service,
-            sourceTags = tags,
+            sourceTags = info.tags,
+            sourceDisplayName = info.displayName,
+            sourceMetadata = info.metadata,
         )
         activeChannel.writeAndFlush(RpcFrameCodec.encode(hello))
     }
 
     private fun applyClientsSync(frame: RpcFrame) {
-        onlineClients.clear()
-        frame.onlineClients.forEach { info ->
-            onlineClients[info.nodeId] = info.copy(tags = info.tags.toSet())
-        }
+        val synced = frame.onlineClients.associateBy { it.nodeId }
+        onlineClients.keys.retainAll(synced.keys)
+        onlineClients.putAll(synced)
     }
 
     private fun scheduleReconnect() {
@@ -239,8 +296,3 @@ class NettyRpcClient(
         }
     }
 }
-
-private fun Collection<String>.normalizedTags(): Set<String> = asSequence()
-    .map { it.trim() }
-    .filter { it.isNotEmpty() }
-    .toSet()

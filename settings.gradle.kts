@@ -20,6 +20,7 @@ dependencyResolutionManagement {
         maven("https://maven.xbaimiao.com/repository/maven-public/")
         mavenCentral()
         maven("https://repo.papermc.io/repository/maven-public/")
+        maven("https://repo.helpch.at/releases/")
     }
 }
 

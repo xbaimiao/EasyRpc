@@ -36,6 +36,25 @@ data class RpcFrame(
     val errorMessage: String = "",
     val sourceTags: Set<String> = emptySet(),
     val onlineClients: List<RpcClientInfo> = emptyList(),
+    val sourceDisplayName: String = "",
+    val sourceMetadata: Map<String, String> = emptyMap(),
+)
+
+/** 把 frame 里的来源元数据整理成 [RpcSource]，displayName 为空时回退成 sourceNode。 */
+fun RpcFrame.toSource(): RpcSource = RpcSource(
+    nodeId = sourceNode,
+    nodeKind = sourceKind,
+    tags = sourceTags,
+    displayName = sourceDisplayName.takeIf { it.isNotEmpty() } ?: sourceNode,
+    metadata = sourceMetadata,
+)
+
+/** 把 frame 里的来源元数据整理成 [RpcClientInfo]。 */
+fun RpcFrame.toClientInfo(): RpcClientInfo = RpcClientInfo.of(
+    nodeId = sourceNode,
+    tags = sourceTags,
+    displayName = sourceDisplayName,
+    metadata = sourceMetadata,
 )
 
 /** protobuf frame 编解码。 */
@@ -58,6 +77,8 @@ object RpcFrameCodec {
             .setErrorMessage(errorMessage)
             .addAllSourceTags(sourceTags)
             .addAllOnlineClients(onlineClients.map { it.toProto() })
+            .setSourceDisplayName(sourceDisplayName)
+            .putAllSourceMetadata(sourceMetadata)
             .build()
     }
 
@@ -75,6 +96,8 @@ object RpcFrameCodec {
             errorMessage = errorMessage,
             sourceTags = sourceTagsList.toSet(),
             onlineClients = onlineClientsList.map { it.toModel() },
+            sourceDisplayName = sourceDisplayName,
+            sourceMetadata = sourceMetadataMap.toMap(),
         )
     }
 
@@ -137,13 +160,17 @@ object RpcFrameCodec {
         return EasyRpcProto.RpcClientInfo.newBuilder()
             .setNodeId(nodeId)
             .addAllTags(tags)
+            .setDisplayName(displayName)
+            .putAllMetadata(metadata)
             .build()
     }
 
     private fun EasyRpcProto.RpcClientInfo.toModel(): RpcClientInfo {
-        return RpcClientInfo(
+        return RpcClientInfo.of(
             nodeId = nodeId,
-            tags = tagsList.toSet(),
+            tags = tagsList,
+            displayName = displayName,
+            metadata = metadataMap,
         )
     }
 }

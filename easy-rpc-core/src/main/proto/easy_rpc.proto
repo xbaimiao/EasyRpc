@@ -43,6 +43,12 @@ message RpcFrame {
 
   // 在线 client 列表。只有 CLIENTS_SYNC frame 使用。
   repeated RpcClientInfo online_clients = 12;
+
+  // 发送方显示名称。HELLO 会用它声明 client 显示名，普通 frame 可作为来源元数据。
+  string source_display_name = 13;
+
+  // 发送方自定义元数据。HELLO 会用它声明 client metadata，普通 frame 可作为来源元数据。
+  map<string, string> source_metadata = 14;
 }
 
 // 路由目标。
@@ -60,6 +66,12 @@ message RpcTarget {
 message RpcClientInfo {
   string node_id = 1;
   repeated string tags = 2;
+
+  // 显示名称。client 没声明时 service 会回退成 node_id。
+  string display_name = 3;
+
+  // 自定义元数据，由 client 自己定义键值含义。
+  map<string, string> metadata = 4;
 }
 
 enum FrameType {

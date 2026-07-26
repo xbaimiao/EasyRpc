@@ -8,6 +8,8 @@ data class ServiceConfig(
     val host: String,
     val port: Int,
     val nodeId: String,
+    /** service 节点显示名称，留空时回退成 [nodeId]。 */
+    val displayName: String? = null,
 )
 
 private const val DEFAULT_HOST = "0.0.0.0"
@@ -29,8 +31,9 @@ fun loadServiceConfig(configPath: Path = Path.of(CONFIG_FILE)): ServiceConfig {
     val host = resolve("EASYRPC_HOST", "host", DEFAULT_HOST)
     val port = resolve("EASYRPC_PORT", "port", DEFAULT_PORT.toString()).toInt()
     val nodeId = resolve("EASYRPC_NODE_ID", "node-id", DEFAULT_NODE_ID)
+    val displayName = resolve("EASYRPC_DISPLAY_NAME", "display-name", "").trim().takeIf { it.isNotEmpty() }
 
-    return ServiceConfig(host, port, nodeId)
+    return ServiceConfig(host, port, nodeId, displayName)
 }
 
 private fun ensureConfigFile(path: Path) {
@@ -41,11 +44,14 @@ private fun ensureConfigFile(path: Path) {
         #   EASYRPC_HOST  -> host
         #   EASYRPC_PORT  -> port
         #   EASYRPC_NODE_ID -> node-id
+        #   EASYRPC_DISPLAY_NAME -> display-name
         host: $DEFAULT_HOST
         port: $DEFAULT_PORT
         node-id: $DEFAULT_NODE_ID
+        # 显示名称，留空则回退成 node-id
+        display-name: ''
     """.trimIndent()
-    Files.createDirectories(path.parent)
+    path.parent?.let { Files.createDirectories(it) }
     Files.writeString(path, content)
 }
 

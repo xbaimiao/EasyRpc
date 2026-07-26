@@ -6,11 +6,49 @@ enum class RpcNodeKind {
     CLIENT,
 }
 
-/** 在线 client 元数据。 */
+/**
+ * 在线 client 元数据。
+ *
+ * - [nodeId]：client 的唯一 ID，路由用的就是它。
+ * - [displayName]：给人看的名字，没声明时等于 [nodeId]。
+ * - [tags]：client 声明的标签，可以用 `RpcTarget.tag()` 批量调用。
+ * - [metadata]：client 自定义的键值元数据，键值含义由业务自己约定。
+ *
+ * 用 [of] 构造可以顺带做 trim、去空和不可变拷贝，避免外部集合被后续修改影响。
+ */
 data class RpcClientInfo(
     val nodeId: String,
     val tags: Set<String> = emptySet(),
-)
+    val displayName: String = nodeId,
+    val metadata: Map<String, String> = emptyMap(),
+) {
+    /** 读取单个 metadata 值。 */
+    fun metadata(key: String): String? = metadata[key]
+
+    /** 是否拥有指定 tag。 */
+    fun hasTag(tag: String): Boolean = tag in tags
+
+    companion object {
+        /** 规范化构造：tags 去空白去空串，displayName 为空时回退成 nodeId，集合做不可变拷贝。 */
+        fun of(
+            nodeId: String,
+            tags: Collection<String> = emptySet(),
+            displayName: String? = null,
+            metadata: Map<String, String> = emptyMap(),
+        ): RpcClientInfo = RpcClientInfo(
+            nodeId = nodeId,
+            tags = tags.normalizedTags(),
+            displayName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: nodeId,
+            metadata = metadata.toMap(),
+        )
+    }
+}
+
+/** tags 规范化：去掉首尾空白和空串，并转成不可变 set。 */
+fun Collection<String>.normalizedTags(): Set<String> = asSequence()
+    .map { it.trim() }
+    .filter { it.isNotEmpty() }
+    .toSet()
 
 /**
  * RPC 调用目标。

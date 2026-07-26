@@ -14,7 +14,9 @@ application {
 }
 
 tasks.shadowJar {
-    archiveClassifier.set("")
+    // 不能用 archiveClassifier="" —— 那样会和 application 插件的 jar 任务抢同一个输出路径，
+    // distZip / distTar / startScripts 会因为缺少依赖声明而报错。这里给一个独立的固定名字。
+    archiveFileName.set("easy-rpc-service.jar")
     manifest {
         attributes["Main-Class"] = "com.xbaimiao.easyrpc.service.ServiceMainKt"
     }

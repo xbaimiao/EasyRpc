@@ -5,6 +5,7 @@
 dependencies {
     implementation(project(":easy-rpc-client-sdk"))
     compileOnly("io.papermc.paper:paper-api:1.18.2-R0.1-SNAPSHOT")
+    compileOnly("me.clip:placeholderapi:2.12.3")
 }
 
 tasks {

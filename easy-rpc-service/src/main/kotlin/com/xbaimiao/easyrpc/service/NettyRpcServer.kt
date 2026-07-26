@@ -27,15 +27,26 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * - service 节点：可以自己注册 RPC handler。
  * - router：负责把 client 发来的 frame 转发到 service、指定 client、all 或 allClients。
- * - registry：保存在线 client 的 nodeId/tags，并同步给所有 client。
+ * - registry：保存在线 client 的 nodeId/displayName/tags/metadata，并同步给所有 client。
  */
 class NettyRpcServer(
     private val host: String = "0.0.0.0",
     private val port: Int = 29090,
     nodeId: String = "service",
+    displayName: String? = null,
+    metadata: Map<String, String> = emptyMap(),
 ) : RpcCaller, RpcRuntime, AutoCloseable {
     /** service 自己的 endpoint。发给 RpcTarget.service() 的请求会进入这里。 */
-    override val endpoint = RpcEndpoint(nodeId, RpcNodeKind.SERVICE)
+    override val endpoint = RpcEndpoint(
+        nodeId = nodeId,
+        nodeKind = RpcNodeKind.SERVICE,
+        nodeDisplayName = displayName,
+        nodeMetadata = metadata,
+    )
+
+    /** service 节点自己的元数据快照。 */
+    val selfInfo: RpcClientInfo get() = endpoint.selfInfo
+
     private val bossGroup: EventLoopGroup = NioEventLoopGroup(1)
     private val workerGroup: EventLoopGroup = NioEventLoopGroup()
     private val clients = ConcurrentHashMap<String, ClientConnection>()
@@ -73,16 +84,27 @@ class NettyRpcServer(
 
     /** 当前在线 client 列表。返回值是快照，不会随内部状态继续变化。 */
     fun onlineClients(): List<RpcClientInfo> = clients.values
-        .map { it.info.copy(tags = it.info.tags.toSet()) }
+        .map { it.info }
         .sortedBy { it.nodeId }
 
     /** 获取指定 nodeId 的在线 client。 */
     fun onlineClient(nodeId: String): RpcClientInfo? = clients[nodeId]?.info
-        ?.let { it.copy(tags = it.tags.toSet()) }
 
     /** 获取拥有指定 tag 的所有在线 client。 */
     fun onlineClientsByTag(tag: String): List<RpcClientInfo> = onlineClients()
         .filter { tag in it.tags }
+
+    /** 获取指定 nodeId 的显示名称，节点不在线时返回 null。 */
+    fun displayNameOf(nodeId: String): String? = clients[nodeId]?.info?.displayName
+
+    /** 获取指定 nodeId 的 tags，节点不在线时返回空集合。 */
+    fun tagsOf(nodeId: String): Set<String> = clients[nodeId]?.info?.tags ?: emptySet()
+
+    /** 获取指定 nodeId 的单个 metadata 值，节点不在线或没这个键时返回 null。 */
+    fun metadataOf(nodeId: String, key: String): String? = clients[nodeId]?.info?.metadata?.get(key)
+
+    /** 当前在线 client 的 nodeId 列表。 */
+    fun onlineNodeIds(): List<String> = clients.keys.sorted()
 
     /** service 主动向其它目标发起单响应 RPC。 */
     override fun <A, R> call(
@@ -159,6 +181,7 @@ class NettyRpcServer(
             requestId = request.requestId,
             sourceNode = endpoint.nodeId,
             sourceKind = RpcNodeKind.SERVICE,
+            sourceDisplayName = endpoint.displayName,
             target = RpcTarget.Node(request.sourceNode),
             group = request.group,
             method = request.method,
@@ -179,6 +202,7 @@ class NettyRpcServer(
             requestId = 0,
             sourceNode = endpoint.nodeId,
             sourceKind = RpcNodeKind.SERVICE,
+            sourceDisplayName = endpoint.displayName,
             target = RpcTarget.AllClients,
             onlineClients = onlineClients(),
         )
@@ -191,7 +215,7 @@ class NettyRpcServer(
         override fun channelRead0(ctx: ChannelHandlerContext, msg: ByteArray) {
             val frame = runCatching { RpcFrameCodec.decode(msg) }.getOrElse { return }
             if (frame.type == RpcFrameType.HELLO) {
-                val info = RpcClientInfo(frame.sourceNode, frame.sourceTags)
+                val info = frame.toClientInfo()
                 nodeId = info.nodeId
                 clients.put(info.nodeId, ClientConnection(ctx.channel(), info))
                     ?.channel

@@ -1,6 +1,7 @@
 ﻿package com.xbaimiao.easyrpc.plugin
 
 import com.xbaimiao.easyrpc.client.NettyRpcClient
+import com.xbaimiao.easyrpc.core.normalizedTags
 import org.bukkit.plugin.java.JavaPlugin
 
 /**
@@ -19,6 +20,7 @@ class EasyRpcClientPlugin : JavaPlugin() {
     }
 
     private var client: NettyRpcClient? = null
+    private var expansion: EasyRpcExpansion? = null
 
     override fun onEnable() {
         plugin = this
@@ -28,9 +30,13 @@ class EasyRpcClientPlugin : JavaPlugin() {
                 logger.warning("EasyRpc client connect failed: ${it.message}")
             }
         }
+        registerPlaceholders()
     }
 
     override fun onDisable() {
+        // persist=true 的 expansion 不会被 PAPI 自动回收，这里手动注销。
+        expansion?.let { runCatching { it.unregister() } }
+        expansion = null
         disconnect()
         plugin = null
     }
@@ -41,16 +47,23 @@ class EasyRpcClientPlugin : JavaPlugin() {
         val host = config.getString("host", "127.0.0.1") ?: "127.0.0.1"
         val port = config.getInt("port", 29090)
         val nodeId = config.getString("node-id", server.name) ?: server.name
-        val tags = config.getStringList("tags")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .toSet()
-        val rpcClient = NettyRpcClient(host, port, nodeId, tags = tags).connect()
+        val tags = config.getStringList("tags").normalizedTags()
+        val displayName = config.getString("display-name")?.trim()?.takeIf { it.isNotEmpty() }
+        val metadata = readMetadata()
+        val rpcClient = NettyRpcClient(
+            host = host,
+            port = port,
+            nodeId = nodeId,
+            tags = tags,
+            displayName = displayName,
+            metadata = metadata,
+        ).connect()
         client = rpcClient
+        val identity = "$nodeId (${rpcClient.displayName})"
         if (rpcClient.isConnected()) {
-            logger.info("EasyRpc client connected to $host:$port as $nodeId")
+            logger.info("EasyRpc client connected to $host:$port as $identity")
         } else {
-            logger.warning("EasyRpc service is unavailable, client will reconnect to $host:$port as $nodeId")
+            logger.warning("EasyRpc service is unavailable, client will reconnect to $host:$port as $identity")
         }
         return rpcClient
     }
@@ -59,5 +72,36 @@ class EasyRpcClientPlugin : JavaPlugin() {
     fun disconnect() {
         client?.close()
         client = null
+    }
+
+    /**
+     * 注册 PlaceholderAPI 变量。
+     *
+     * 本插件是 `load: STARTUP`，enable 时机早于 PlaceholderAPI，所以必须延迟到第一个 tick 再注册。
+     * 没装 PlaceholderAPI 时安静跳过，不影响 RPC 功能。
+     */
+    private fun registerPlaceholders() {
+        server.scheduler.runTask(this, Runnable {
+            if (!server.pluginManager.isPluginEnabled("PlaceholderAPI")) return@Runnable
+            runCatching {
+                EasyRpcExpansion(this).also {
+                    it.register()
+                    expansion = it
+                }
+            }.onSuccess {
+                logger.info("EasyRpc placeholders registered: %easyrpc_node_id%, %easyrpc_meta_<key>% ...")
+            }.onFailure {
+                logger.warning("EasyRpc placeholder register failed: ${it.message}")
+            }
+        })
+    }
+
+    /** 读取 config.yml 里的 metadata 段，值统一转成 String。 */
+    private fun readMetadata(): Map<String, String> {
+        val section = config.getConfigurationSection("metadata") ?: return emptyMap()
+        return section.getKeys(false).mapNotNull { key ->
+            val value = section.get(key)?.toString()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            key to value
+        }.toMap()
     }
 }

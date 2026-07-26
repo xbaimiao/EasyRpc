@@ -41,12 +41,55 @@ class RpcEndpoint(
         Thread(task, "easy-rpc-timeout-$nodeId").apply { isDaemon = true }
     },
     /** 当前节点 tags，会写入发出的 RPC frame，方便 handler 从 RpcSource 读取。 */
-    private val nodeTags: Set<String> = emptySet(),
+    nodeTags: Set<String> = emptySet(),
+    /** 当前节点显示名称，为空时回退成 [nodeId]。 */
+    nodeDisplayName: String? = null,
+    /** 当前节点自定义元数据，会写入发出的 RPC frame。 */
+    nodeMetadata: Map<String, String> = emptyMap(),
 ) : AutoCloseable {
     private val ids = AtomicLong(1)
     private val pending = ConcurrentHashMap<Long, PendingCall<Any?>>()
     private val pendingMany = ConcurrentHashMap<Long, PendingMany<Any?>>()
     private val handlers = ConcurrentHashMap<String, HandlerRegistration<Any?, Any?>>()
+
+    /**
+     * 当前节点的自我描述，会写进所有发出的 frame。
+     *
+     * 用 [updateSelfInfo] 替换整个快照，读写都是原子的，不需要额外加锁。
+     */
+    @Volatile
+    var selfInfo: RpcClientInfo = RpcClientInfo.of(nodeId, nodeTags, nodeDisplayName, nodeMetadata)
+        private set
+
+    /** 当前节点 tags。 */
+    val tags: Set<String> get() = selfInfo.tags
+
+    /** 当前节点显示名称。 */
+    val displayName: String get() = selfInfo.displayName
+
+    /** 当前节点自定义元数据。 */
+    val metadata: Map<String, String> get() = selfInfo.metadata
+
+    /**
+     * 更新当前节点的自我描述。只传需要改的参数，其它保持不变。
+     *
+     * 这里只改本地状态；要让 service 和其它 client 看到新值，需要由调用方重新发送 HELLO。
+     */
+    fun updateSelfInfo(
+        tags: Collection<String>? = null,
+        displayName: String? = null,
+        metadata: Map<String, String>? = null,
+    ): RpcClientInfo {
+        val current = selfInfo
+        val updated = RpcClientInfo.of(
+            nodeId = nodeId,
+            tags = tags ?: current.tags,
+            displayName = displayName ?: current.displayName,
+            metadata = metadata ?: current.metadata,
+        )
+        selfInfo = updated
+        return updated
+    }
 
     /** 注册一个底层 handler。通常业务代码会使用 `RpcMethod.listen(runtime) { ... }`。 */
     fun <A, R> register(method: RpcMethod<A, R>, handler: (RpcSource, A) -> CompletionStage<R>) {
@@ -123,7 +166,9 @@ class RpcEndpoint(
             requestId = requestId,
             sourceNode = nodeId,
             sourceKind = nodeKind,
-            sourceTags = nodeTags,
+            sourceTags = selfInfo.tags,
+            sourceDisplayName = selfInfo.displayName,
+            sourceMetadata = selfInfo.metadata,
             target = target,
             group = method.group,
             method = method.name,
@@ -193,7 +238,7 @@ class RpcEndpoint(
             runCatching {
                 val method = registration.method
                 val args = decodePayload(frame.payload, method.argsCodec)
-                registration.handler(RpcSource(frame.sourceNode, frame.sourceKind, frame.sourceTags), args).whenComplete { result, error ->
+                registration.handler(frame.toSource(), args).whenComplete { result, error ->
                     if (error != null) {
                         val rpcError = error.unwrapRpcError()
                         sendError(connection, frame, rpcError.classifier, rpcError.message)
@@ -204,7 +249,9 @@ class RpcEndpoint(
                             requestId = frame.requestId,
                             sourceNode = nodeId,
                             sourceKind = nodeKind,
-                            sourceTags = nodeTags,
+                            sourceTags = selfInfo.tags,
+                            sourceDisplayName = selfInfo.displayName,
+                            sourceMetadata = selfInfo.metadata,
                             target = RpcTarget.Node(frame.sourceNode),
                             group = frame.group,
                             method = frame.method,
@@ -226,7 +273,9 @@ class RpcEndpoint(
             requestId = request.requestId,
             sourceNode = nodeId,
             sourceKind = nodeKind,
-            sourceTags = nodeTags,
+            sourceTags = selfInfo.tags,
+            sourceDisplayName = selfInfo.displayName,
+            sourceMetadata = selfInfo.metadata,
             target = RpcTarget.Node(request.sourceNode),
             group = request.group,
             method = request.method,
