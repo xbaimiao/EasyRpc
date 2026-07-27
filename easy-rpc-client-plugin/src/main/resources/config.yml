@@ -39,7 +39,7 @@ remote-command:
   # 默认关闭。打开等于把本服的完整控制权交给任何持有相同 auth-token 的节点，
   # 因为控制台命令里包含 op、stop 这种。只在你确实需要批量运维时打开。
   # 注意这个开关管的是「本服是否被别人操作」，不影响本服能不能操作别人。
-  accept: false
+  accept: true
 
   # 是否把命令输出回传给发起方。
   # 实现方式是用动态代理包一层 console sender，极少数插件会把 sender 强转成

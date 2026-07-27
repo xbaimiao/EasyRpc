@@ -117,7 +117,7 @@ class EasyRpcClientPlugin : JavaPlugin() {
     }
 
     /** 是否允许别的节点让本服执行控制台命令。 */
-    fun acceptRemoteCommands(): Boolean = config.getBoolean("remote-command.accept", false)
+    fun acceptRemoteCommands(): Boolean = config.getBoolean("remote-command.accept", true)
 
     /** 是否捕获命令输出回传给发起方。 */
     fun captureCommandOutput(): Boolean = config.getBoolean("remote-command.capture-output", true)
