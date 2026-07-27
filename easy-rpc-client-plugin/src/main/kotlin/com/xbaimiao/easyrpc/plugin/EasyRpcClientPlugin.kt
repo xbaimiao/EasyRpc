@@ -74,6 +74,7 @@ class EasyRpcClientPlugin : JavaPlugin() {
             logger.severe("EasyRpc auth rejected by service: $reason")
             logger.severe("Fix auth-token in config.yml, then run: /easyrpc reconnect")
         }
+        registerConsoleHandler(rpcClient)
         rpcClient.connect()
         client = rpcClient
         val identity = "$nodeId (${rpcClient.displayName})"
@@ -112,6 +113,32 @@ class EasyRpcClientPlugin : JavaPlugin() {
             "EasyRpc 已用新 token 重新连接，请查看控制台日志确认结果"
         } else {
             "EasyRpc 重连失败，client 可能已关闭"
+        }
+    }
+
+    /** 是否允许别的节点让本服执行控制台命令。 */
+    fun acceptRemoteCommands(): Boolean = config.getBoolean("remote-command.accept", false)
+
+    /** 是否捕获命令输出回传给发起方。 */
+    fun captureCommandOutput(): Boolean = config.getBoolean("remote-command.capture-output", true)
+
+    /**
+     * 注册接收端 handler。
+     *
+     * 默认关闭：远程执行控制台命令等于把本服的完整控制权交给任何持有 token 的节点，
+     * 必须由这台服务器的管理员显式打开，不能因为装了插件就自动获得。
+     */
+    private fun registerConsoleHandler(rpcClient: NettyRpcClient) {
+        if (!acceptRemoteCommands()) {
+            logger.info("EasyRpc remote-command.accept=false, 本服不接受远程控制台命令")
+            return
+        }
+        logger.warning("EasyRpc remote-command.accept=true, 任何持有相同 token 的节点都可以让本服执行控制台命令")
+        ConsoleRpc.RUN.listenAsync(rpcClient) { source, command, requester ->
+            // 审计日志。source.nodeId 已由 service 校验过和连接一致，但仍只代表
+            // 「某个持有 token 的连接自称是它」，不能当成强身份。
+            logger.warning("EasyRpc remote command from ${source.nodeId} ($requester): $command")
+            ConsoleCommandRunner.run(this, command, captureCommandOutput())
         }
     }
 

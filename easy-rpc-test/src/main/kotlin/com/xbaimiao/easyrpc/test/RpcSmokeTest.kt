@@ -3,12 +3,15 @@
 import com.xbaimiao.easyrpc.client.NettyRpcClient
 import com.xbaimiao.easyrpc.codec.RpcCodecs
 import com.xbaimiao.easyrpc.core.RPC_ERROR_UNAUTHORIZED
+import com.xbaimiao.easyrpc.core.RpcClientInfo
 import com.xbaimiao.easyrpc.core.RpcException
 import com.xbaimiao.easyrpc.core.RpcFrame
 import com.xbaimiao.easyrpc.core.RpcFrameCodec
 import com.xbaimiao.easyrpc.core.RpcFrameType
 import com.xbaimiao.easyrpc.core.RpcNodeKind
+import com.xbaimiao.easyrpc.core.RpcTagMatch
 import com.xbaimiao.easyrpc.core.RpcTarget
+import com.xbaimiao.easyrpc.core.filterByTags
 import com.xbaimiao.easyrpc.dsl.BuiltinRpc
 import com.xbaimiao.easyrpc.dsl.RpcGroup
 import com.xbaimiao.easyrpc.service.NettyRpcServer
@@ -130,6 +133,9 @@ fun main() {
         println("被冒充方是否仍正常 => ${clientA.isConnected()} / ${victimStillOk.getOrElse { "失败: ${it.message}" }}")
 
         verifyAuth(port, token)
+
+        println("-- 多 tag 匹配 --")
+        verifyTagMatching()
     } finally {
     }
     server.awaitClose()
@@ -170,6 +176,34 @@ private fun verifyHandshakeRequired(port: Int) {
         println("未握手直接发 REQUEST => classifier=${response?.errorClassifier} message=${response?.errorMessage}")
         println("是否被拒 => ${response?.errorClassifier == RPC_ERROR_UNAUTHORIZED}")
     }
+}
+
+/**
+ * 验证多 tag 匹配语义，用的就是需求里那个例子。
+ *
+ * server1 tags=[1,2,3]，server2 tags=[2,3]：
+ * - ALL 查 [1,2] 只命中 server1（server2 没有 tag 1）
+ * - ALL 查 [1,2,3] 只命中 server1
+ * - ALL 查 [2,3] 命中两个
+ * - ANY 查 [1,2] 命中两个
+ */
+private fun verifyTagMatching() {
+    val server1 = RpcClientInfo.of("server1", tags = listOf("1", "2", "3"))
+    val server2 = RpcClientInfo.of("server2", tags = listOf("2", "3"))
+    val nodes = listOf(server1, server2)
+
+    fun show(label: String, required: List<String>, match: RpcTagMatch) {
+        val hit = nodes.filterByTags(required, match).map { it.nodeId }
+        println("$label ${required.joinToString(",")} => ${hit.joinToString(", ").ifEmpty { "<无>" }}")
+    }
+
+    show("ALL", listOf("1", "2"), RpcTagMatch.ALL)
+    show("ALL", listOf("1", "2", "3"), RpcTagMatch.ALL)
+    show("ALL", listOf("2", "3"), RpcTagMatch.ALL)
+    show("ALL", listOf("1", "4"), RpcTagMatch.ALL)
+    show("ANY", listOf("1", "2"), RpcTagMatch.ANY)
+    show("ANY", listOf("1", "4"), RpcTagMatch.ANY)
+    println("空 tag 列表是否命中全部 => ${nodes.filterByTags(emptyList(), RpcTagMatch.ALL).size} (应为 0)")
 }
 
 /**

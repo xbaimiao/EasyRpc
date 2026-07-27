@@ -256,6 +256,78 @@ val QUERY = rpc("query")
     .returnsNullable(ANCHOR)
 ```
 
+## 跨服控制台命令
+
+Paper 插件自带批量执行控制台命令的功能。
+
+### 接收端必须显式打开
+
+```yaml
+remote-command:
+  accept: false    # 默认关闭
+```
+
+**默认是关的，而且必须每台被操作的服务器自己打开。** 控制台命令里有 `op`、`stop`、`ban`，
+打开就等于把这台服务器的完整控制权交给任何持有相同 `auth-token` 的节点。
+装了插件不会自动获得这个能力。
+
+这个开关只管「本服能不能被别人操作」，不影响本服操作别人。
+
+### 用法
+
+```text
+/easyrpc run <nodeId> <命令>          在指定节点执行
+/easyrpc tagrun <tag1,tag2> <命令>    在同时拥有全部指定 tag 的节点执行
+/easyrpc anyrun <tag1,tag2> <命令>    在拥有任意一个指定 tag 的节点执行
+/easyrpc allrun <命令>                在所有在线节点执行
+```
+
+命令前面带不带 `/` 都行。发起方需要 `easyrpc.run` 权限（默认 op）。
+
+### 多 tag 匹配语义
+
+`tagrun` 是 **AND**：节点必须同时拥有你列出的全部 tag。tag 越多，命中范围越窄。
+
+以 server1 `tags=[1,2,3]`、server2 `tags=[2,3]` 为例：
+
+| 命令 | 命中 |
+| --- | --- |
+| `tagrun 1,2` | server1 |
+| `tagrun 1,2,3` | server1 |
+| `tagrun 2,3` | server1, server2 |
+| `tagrun 1,4` | 无 |
+| `anyrun 1,2` | server1, server2 |
+| `anyrun 1,4` | server1 |
+
+`anyrun` 是 **OR**：有任意一个 tag 就命中，tag 越多范围越宽。
+
+空 tag 列表一律不命中任何节点，避免手滑打成 `tagrun "" stop` 就把全服都关了。
+
+### 结果输出
+
+逐节点返回，能看清哪台成功哪台失败：
+
+```text
+正在对 2 个节点执行: say hello
+执行完成: 成功 1 / 共 2
+[OK] lobby-1 (大厅一号)
+    [Server] hello
+[FAIL] game-2 (生存服)
+    目标未安装 EasyRpcClient 或未开启远程命令
+```
+
+每个节点是一次独立 RPC，互不影响——某台超时或没开 `accept` 只反映在它自己那一行。
+
+### 实现上的两个注意点
+
+**输出捕获**用动态代理包一层 console sender 来拦 `sendMessage`。极少数插件会把 sender
+强转成 CraftBukkit 实现类，那样会抛异常；这时会自动退回原始 console 重试，命令照样执行，
+只是拿不到回显。也可以直接 `capture-output: false` 彻底避开。单条命令输出超过 200 行会截断。
+
+**目标解析在发起方本地完成**：先从 `CLIENTS_SYNC` 同步来的在线列表筛出命中节点，
+再逐个发 `RpcTarget.node()`。没有用 `RpcTarget.tag()` + `callAll`，因为那条路只支持单 tag，
+而且响应里分不出哪条来自哪个节点——批量运维必须能逐节点归因。
+
 ## 鉴权
 
 service 和所有 client 共用一个 token。client 在 HELLO 里带上它，service 校验通过才会把这条连接接入路由。

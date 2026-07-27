@@ -8,10 +8,13 @@ softdepend:
   - PlaceholderAPI
 commands:
   easyrpc:
-    description: EasyRpc 状态查询与重连
-    usage: /easyrpc [status|reconnect|nodes]
+    description: EasyRpc 状态查询、重连与跨服命令
+    usage: /easyrpc [status|nodes|reconnect|run|tagrun|anyrun|allrun|help]
     permission: easyrpc.admin
 permissions:
   easyrpc.admin:
     description: 使用 /easyrpc 命令
+    default: op
+  easyrpc.run:
+    description: 向其它服务器下发控制台命令
     default: op

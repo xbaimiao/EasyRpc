@@ -50,6 +50,41 @@ fun Collection<String>.normalizedTags(): Set<String> = asSequence()
     .filter { it.isNotEmpty() }
     .toSet()
 
+/** 多 tag 匹配方式。 */
+enum class RpcTagMatch {
+    /**
+     * 必须拥有全部指定 tag（子集匹配）。
+     *
+     * 节点 tags 是 [1,2,3] 时：查 [1,2] 命中，查 [1,2,3] 命中，查 [1,4] 不命中。
+     * tag 越多筛得越窄，适合精确挑目标。
+     */
+    ALL,
+
+    /**
+     * 拥有任意一个指定 tag 即命中。
+     *
+     * 节点 tags 是 [1,2,3] 时：查 [1,4] 命中（因为有 1）。
+     * tag 越多筛得越宽，适合「这几类服务器都要」。
+     */
+    ANY,
+}
+
+/** 判断当前节点是否满足给定的 tag 条件。tags 为空时返回 false，避免误命中全部节点。 */
+fun RpcClientInfo.matchesTags(required: Collection<String>, match: RpcTagMatch = RpcTagMatch.ALL): Boolean {
+    val wanted = required.normalizedTags()
+    if (wanted.isEmpty()) return false
+    return when (match) {
+        RpcTagMatch.ALL -> tags.containsAll(wanted)
+        RpcTagMatch.ANY -> wanted.any { it in tags }
+    }
+}
+
+/** 从一批节点里筛出满足 tag 条件的。 */
+fun Collection<RpcClientInfo>.filterByTags(
+    required: Collection<String>,
+    match: RpcTagMatch = RpcTagMatch.ALL,
+): List<RpcClientInfo> = filter { it.matchesTags(required, match) }.sortedBy { it.nodeId }
+
 /**
  * RPC 调用目标。
  *
