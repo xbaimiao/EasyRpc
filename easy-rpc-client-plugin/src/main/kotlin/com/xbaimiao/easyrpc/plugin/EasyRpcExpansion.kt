@@ -32,6 +32,7 @@ import org.bukkit.OfflinePlayer
  * 在线列表：
  *
  * ```text
+ * %easyrpc_online_players%            所有 Bukkit 节点的在线玩家总数
  * %easyrpc_online_count%              在线 client 数量
  * %easyrpc_online_nodes%              在线 nodeId，逗号分隔
  * %easyrpc_online_names%              在线显示名称，逗号分隔
@@ -66,6 +67,7 @@ class EasyRpcExpansion(private val plugin: EasyRpcClientPlugin) : PlaceholderExp
             key.equals("tags", ignoreCase = true) -> resolveInfo(client, argument)?.tags?.joinToString(", ") ?: ""
             key.equals("connected", ignoreCase = true) -> client.isConnected().toString()
             key.equals("online", ignoreCase = true) -> onlineFlag(client, argument)
+            key.equals("online_players", ignoreCase = true) -> onlinePlayers(client)
             key.equals("online_count", ignoreCase = true) -> client.onlineClients().size.toString()
             key.equals("online_nodes", ignoreCase = true) -> client.onlineNodeIds().joinToString(", ")
             key.equals("online_names", ignoreCase = true) -> client.onlineClients().joinToString(", ") { it.displayName }
@@ -102,6 +104,18 @@ class EasyRpcExpansion(private val plugin: EasyRpcClientPlugin) : PlaceholderExp
         if (tag.isEmpty()) return "0"
         return client.onlineClientsByTag(tag).size.toString()
     }
+
+    /** 只汇总 Bukkit 插件自动维护的 metadata，普通 SDK client 不参与玩家人数统计。 */
+    private fun onlinePlayers(client: NettyRpcClient): String = client.onlineClients()
+        .asSequence()
+        .filter { it.metadata(EasyRpcClientPlugin.CLIENT_TYPE_METADATA_KEY) == EasyRpcClientPlugin.BUKKIT_CLIENT_TYPE }
+        .mapNotNull { info ->
+            info.metadata(EasyRpcClientPlugin.ONLINE_PLAYERS_METADATA_KEY)
+                ?.toLongOrNull()
+                ?.takeIf { it >= 0 }
+        }
+        .sum()
+        .toString()
 
     private fun nodesByTag(client: NettyRpcClient, tag: String): String {
         if (tag.isEmpty()) return ""

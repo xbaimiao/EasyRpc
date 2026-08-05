@@ -2,6 +2,11 @@
 
 import com.xbaimiao.easyrpc.client.NettyRpcClient
 import com.xbaimiao.easyrpc.core.normalizedTags
+import org.bukkit.event.EventHandler
+import org.bukkit.event.EventPriority
+import org.bukkit.event.Listener
+import org.bukkit.event.player.PlayerJoinEvent
+import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.plugin.java.JavaPlugin
 
 /**
@@ -10,8 +15,13 @@ import org.bukkit.plugin.java.JavaPlugin
  * 这个插件只负责维护一个 [NettyRpcClient] 连接，不承载 service/router。
  * 其它插件可以依赖它，然后通过 [client] 获取 SDK client 发起 RPC 或注册 handler。
  */
-class EasyRpcClientPlugin : JavaPlugin() {
+class EasyRpcClientPlugin : JavaPlugin(), Listener {
     companion object {
+        /** Bukkit 节点自动上报的保留 metadata，供跨服在线人数变量识别和汇总。 */
+        internal const val CLIENT_TYPE_METADATA_KEY = "easyrpc-client-type"
+        internal const val ONLINE_PLAYERS_METADATA_KEY = "easyrpc-online-players"
+        internal const val BUKKIT_CLIENT_TYPE = "bukkit"
+
         private var plugin: EasyRpcClientPlugin? = null
 
         fun instance(): EasyRpcClientPlugin = plugin ?: error("EasyRpcClientPlugin is not enabled")
@@ -21,10 +31,12 @@ class EasyRpcClientPlugin : JavaPlugin() {
 
     private var client: NettyRpcClient? = null
     private var expansion: EasyRpcExpansion? = null
+    private var onlinePlayerCountSyncScheduled = false
 
     override fun onEnable() {
         plugin = this
         saveDefaultConfig()
+        server.pluginManager.registerEvents(this, this)
         if (config.getBoolean("connect-on-enable", true)) {
             runCatching { connect() }.onFailure {
                 logger.warning("EasyRpc client connect failed: ${it.message}")
@@ -56,7 +68,7 @@ class EasyRpcClientPlugin : JavaPlugin() {
             ?: server.name
         val tags = config.getStringList("tags").normalizedTags()
         val displayName = config.getString("display-name")?.trim()?.takeIf { it.isNotEmpty() }
-        val metadata = readMetadata()
+        val metadata = readBukkitMetadata()
         val authToken = config.getString("auth-token")?.trim() ?: ""
         if (authToken.isEmpty()) {
             logger.warning("EasyRpc auth-token is empty; this only works if the service has auth disabled")
@@ -123,6 +135,37 @@ class EasyRpcClientPlugin : JavaPlugin() {
     fun captureCommandOutput(): Boolean = config.getBoolean("remote-command.capture-output", true)
 
     /**
+     * 玩家加入或退出事件触发时，事件当下的 Bukkit 在线列表可能仍处于变更过程。
+     * 延迟到下一 tick 再读取最终人数，并合并同一 tick 内的多次变更。
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onPlayerJoin(event: PlayerJoinEvent) {
+        scheduleOnlinePlayerCountSync()
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onPlayerQuit(event: PlayerQuitEvent) {
+        scheduleOnlinePlayerCountSync()
+    }
+
+    private fun scheduleOnlinePlayerCountSync() {
+        if (onlinePlayerCountSyncScheduled) return
+        onlinePlayerCountSyncScheduled = true
+        server.scheduler.runTask(this, Runnable {
+            onlinePlayerCountSyncScheduled = false
+            syncOnlinePlayerCount()
+        })
+    }
+
+    /** 人数没有变化时不重发 HELLO，避免产生无意义的全节点在线列表广播。 */
+    private fun syncOnlinePlayerCount() {
+        val rpcClient = client ?: return
+        val onlinePlayers = server.onlinePlayers.size.toString()
+        if (rpcClient.metadata[ONLINE_PLAYERS_METADATA_KEY] == onlinePlayers) return
+        rpcClient.updateMetadata(ONLINE_PLAYERS_METADATA_KEY, onlinePlayers)
+    }
+
+    /**
      * 注册接收端 handler。
      *
      * 默认关闭：远程执行控制台命令等于把本服的完整控制权交给任何持有 token 的节点，
@@ -171,5 +214,11 @@ class EasyRpcClientPlugin : JavaPlugin() {
             val value = section.get(key)?.toString()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             key to value
         }.toMap()
+    }
+
+    /** 合并 Bukkit 节点的运行时信息；保留键始终由插件维护，不能被配置覆盖。 */
+    private fun readBukkitMetadata(): Map<String, String> = readMetadata().toMutableMap().apply {
+        this[CLIENT_TYPE_METADATA_KEY] = BUKKIT_CLIENT_TYPE
+        this[ONLINE_PLAYERS_METADATA_KEY] = server.onlinePlayers.size.toString()
     }
 }

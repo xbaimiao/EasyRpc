@@ -207,12 +207,16 @@ connect-on-enable: true
 在线列表：
 
 ```text
+%easyrpc_online_players%          所有 Bukkit 节点的在线玩家总数
 %easyrpc_online_count%            在线 client 数量
 %easyrpc_online_nodes%            在线 nodeId，逗号分隔
 %easyrpc_online_names%            在线显示名称，逗号分隔
 %easyrpc_online_count_tag:lobby%  带 lobby tag 的在线数量
 %easyrpc_online_nodes_tag:lobby%  带 lobby tag 的在线 nodeId
 ```
+
+每个 Bukkit 节点会在玩家加入、退出后自动同步本服人数；普通 JVM client 不参与
+`%easyrpc_online_players%` 的汇总。所有 Bukkit 服务端都更新到支持该变量的版本后，统计才完整。
 
 节点不在线或 metadata 键不存在时返回空字符串，可以直接拼进消息里。
 
@@ -532,4 +536,3 @@ TAG_LOBBY => client-a:echo:broadcast-lobby, client-b:echo:broadcast-lobby
 ADD => 42
 FAIL => test_error:this is expected
 ```
-
