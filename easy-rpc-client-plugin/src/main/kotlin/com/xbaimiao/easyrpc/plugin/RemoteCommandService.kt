@@ -25,7 +25,7 @@ data class RemoteCommandResult(
  * 之所以不用 `RpcTarget.tag()` + `callAll`：那条路只支持单 tag，而且响应里分不清
  * 哪条来自哪个节点。批量运维必须能逐节点看成功失败，所以宁可多发几次请求。
  */
-class RemoteCommandService(private val plugin: EasyRpcClientPlugin) {
+class RemoteCommandService {
     /** 解析 tag 条件命中的在线节点。 */
     fun resolveByTags(tags: Collection<String>, match: RpcTagMatch): List<RpcClientInfo> {
         val client = EasyRpcClientPlugin.clientOrNull() ?: return emptyList()
@@ -69,11 +69,8 @@ class RemoteCommandService(private val plugin: EasyRpcClientPlugin) {
         requester: String,
         timeout: Duration,
     ): CompletableFuture<RemoteCommandResult> {
-        // 目标是自己时直接本地执行，省一次网络往返，也避免依赖 service 回环路由。
-        if (target.nodeId == client.nodeId) {
-            return ConsoleCommandRunner.run(plugin, command, plugin.captureCommandOutput())
-                .thenApply { RemoteCommandResult(target.nodeId, target.displayName, true, it) }
-        }
+        // 自身节点也统一经过 RPC 回环，避免在 /easyrpc 的命令调用栈里嵌套分发目标命令。
+        // 这样所有节点都由接收端异步 handler 调度到 Bukkit 主线程，输出捕获行为保持一致。
         return ConsoleRpc.RUN
             .args(command, requester)
             .call(client, RpcTarget.node(target.nodeId), timeout)

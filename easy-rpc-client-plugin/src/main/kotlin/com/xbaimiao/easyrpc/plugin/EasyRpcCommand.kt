@@ -19,7 +19,7 @@ import org.bukkit.command.TabCompleter
  * - `allrun <命令>`：在所有在线节点执行。
  */
 class EasyRpcCommand(private val plugin: EasyRpcClientPlugin) : CommandExecutor, TabCompleter {
-    private val remote = RemoteCommandService(plugin)
+    private val remote = RemoteCommandService()
 
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         when (args.firstOrNull()?.lowercase()) {
