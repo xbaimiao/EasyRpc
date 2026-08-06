@@ -324,9 +324,11 @@ remote-command:
 
 ### 实现上的两个注意点
 
-**输出捕获**用动态代理包一层 console sender 来拦 `sendMessage`。极少数插件会把 sender
-强转成 CraftBukkit 实现类，那样会抛异常；这时会自动退回原始 console 重试，命令照样执行，
-只是拿不到回显。也可以直接 `capture-output: false` 彻底避开。单条命令输出超过 200 行会截断。
+**输出捕获**使用 Paper 官方的 `Bukkit.createCommandSender` 创建反馈转发 sender。它具有与控制台
+相同的有效权限，而且 Paper 的命令分发器会保留这个 sender，把 Bukkit 命令和原版命令发给执行者的
+消息交给 EasyRpc 回传。插件主动写入 logger 的日志、绕过执行者直接发给真实控制台的消息，以及异步
+线程稍后产生的内容不属于本次同步命令反馈，不会被捕获。`capture-output: false` 会直接使用真实控制台
+执行且不回传输出。单条命令输出超过 200 行会截断。
 
 **目标解析在发起方本地完成**：先从 `CLIENTS_SYNC` 同步来的在线列表筛出命中节点，
 再逐个发 `RpcTarget.node()`。没有用 `RpcTarget.tag()` + `callAll`，因为那条路只支持单 tag，

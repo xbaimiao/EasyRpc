@@ -2,12 +2,7 @@ package com.xbaimiao.easyrpc.plugin
 
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
-import net.md_5.bungee.api.chat.BaseComponent
 import org.bukkit.Bukkit
-import org.bukkit.command.ConsoleCommandSender
-import java.lang.reflect.InvocationHandler
-import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 import java.util.Collections
 import java.util.concurrent.CompletableFuture
 
@@ -16,8 +11,8 @@ import java.util.concurrent.CompletableFuture
  *
  * Bukkit 的命令分发不是线程安全的，必须回主线程执行，所以这里返回 future。
  *
- * 输出捕获用动态代理包一层 [ConsoleCommandSender]：拦下 sendMessage 收集文本，
- * 其它方法全部转发给真正的 console sender。这样不依赖 NMS，跨版本也能用。
+ * 输出捕获使用 Paper 提供的反馈转发 sender。Paper 的命令分发器会保留这个专用 sender，
+ * 并把 Bukkit 命令和原版命令发送给执行者的消息统一交给回调。
  */
 object ConsoleCommandRunner {
     /** 单条命令的输出上限，避免某个命令刷屏把 RPC payload 撑爆。 */
@@ -27,8 +22,7 @@ object ConsoleCommandRunner {
      * 执行一条命令。
      *
      * @param command 不带前导斜杠的命令
-     * @param captureOutput 是否用代理捕获输出。关掉就直接用真实 console sender，
-     *        兼容性最好但拿不到回显。
+     * @param captureOutput 是否使用 Paper 的反馈转发 sender 捕获输出；关闭后直接使用真实控制台。
      */
     fun run(
         plugin: EasyRpcClientPlugin,
@@ -57,16 +51,14 @@ object ConsoleCommandRunner {
         }
 
         val collected = Collections.synchronizedList(mutableListOf<String>())
-        val proxy = newCapturingSender(console, collected)
-        // 代理可能被某些插件强转成实现类而抛错，这时退回真实 sender 重试一次，
-        // 保证命令至少被执行到，只是拿不到回显。
-        val ok = runCatching { Bukkit.dispatchCommand(proxy, command) }.getOrElse {
-            collected.clear()
-            collected += "（输出捕获失败，已用原始 console 重试: ${it::class.java.simpleName}）"
-            Bukkit.dispatchCommand(console, command)
-        }
+        // 这个 sender 是 Paper 命令分发器原生支持的反馈通道，权限与真实控制台一致。
+        val sender = Bukkit.createCommandSender { message -> captureComponent(message, collected) }
+        val ok = Bukkit.dispatchCommand(sender, command)
+        return formatResult(command, ok, collected.toList())
+    }
 
-        val lines = collected.toList()
+    /** 格式化单个节点的命令结果，并限制回传行数。 */
+    private fun formatResult(command: String, ok: Boolean, lines: List<String>): String {
         val body = when {
             lines.isEmpty() -> "（无输出）"
             lines.size > MAX_OUTPUT_LINES ->
@@ -76,37 +68,9 @@ object ConsoleCommandRunner {
         return if (ok) body else "命令未找到或执行失败: $command\n$body"
     }
 
-    /** 造一个转发所有调用、但把 sendMessage 内容抄下来的 ConsoleCommandSender 代理。 */
-    private fun newCapturingSender(
-        delegate: ConsoleCommandSender,
-        sink: MutableList<String>,
-    ): ConsoleCommandSender {
-        val handler = InvocationHandler { _, method: Method, args: Array<Any?>? ->
-            if (method.name == "sendMessage") {
-                // 重载形态很多：sendMessage(String)、(String[])、(Component)、
-                // (BaseComponent)、(UUID, String) 等。UUID 那类首参不是内容，要跳过。
-                args?.filterNot { it is java.util.UUID }?.forEach { sink.addAll(flatten(it)) }
-                return@InvocationHandler null
-            }
-            // spigot() 返回的对象上也有 sendMessage，但那条路很少用，这里不额外代理，
-            // 直接转发即可，最坏情况是那部分输出抓不到。
-            method.invoke(delegate, *(args ?: emptyArray()))
-        }
-        return Proxy.newProxyInstance(
-            ConsoleCommandSender::class.java.classLoader,
-            arrayOf(ConsoleCommandSender::class.java),
-            handler,
-        ) as ConsoleCommandSender
-    }
-
-    /** 把各种 sendMessage 入参统一拍平成文本行。 */
-    private fun flatten(value: Any?): List<String> = when (value) {
-        null -> emptyList()
-        is String -> listOf(value)
-        is Array<*> -> value.flatMap { flatten(it) }
-        is Iterable<*> -> value.flatMap { flatten(it) }
-        is BaseComponent -> listOf(value.toLegacyText())
-        is Component -> listOf(PlainTextComponentSerializer.plainText().serialize(value))
-        else -> listOf(value.toString())
+    /** 将 Adventure 消息转成 RPC 返回使用的纯文本，并按真实换行拆分。 */
+    private fun captureComponent(message: Component, sink: MutableList<String>) {
+        val text = PlainTextComponentSerializer.plainText().serialize(message)
+        sink.addAll(text.lineSequence().toList())
     }
 }

@@ -42,7 +42,6 @@ remote-command:
   accept: true
 
   # 是否把命令输出回传给发起方。
-  # 实现方式是用动态代理包一层 console sender，极少数插件会把 sender 强转成
-  # 实现类而失败；这种情况会自动退回原始 console 重试，只是拿不到回显。
-  # 完全关掉可以避开这个兼容性问题。
+  # 默认值：true。布尔值；true 使用 Paper 的命令反馈通道捕获，false 使用真实控制台且不回传输出。
+  # 只捕获命令通过发送者返回的同步反馈；插件主动写入日志或异步线程稍后产生的内容不会回传。
   capture-output: true
